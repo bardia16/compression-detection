@@ -32,6 +32,7 @@ from . import notifier as nt
 from . import universe as uni
 from .atr import atr_series
 from .audit import Audit
+from .candle_health import has_candle_problems
 from .config import REPO, Config
 from .detector import detect_candidates
 from .dow import label_all_pivots
@@ -45,8 +46,11 @@ from .zigzag import ZigZag
 
 log = logging.getLogger("engine")
 
-REPORTS_DIR = REPO / "scan_reports"
+AUDIT_DIR = Path(os.environ.get("COMPRESSION_AUDIT_DIR", str(REPO / "audit")))
+REPORTS_DIR = Path(os.environ.get("COMPRESSION_REPORTS_DIR", str(REPO / "scan_reports")))
 CHART_SPACING_S = 1.5          # min gap between chart-server requests
+CHART_RETRY_DELAY_S = 3.0      # one retry before the text-only fallback (chart
+                               # service 503s transiently during scan bursts)
 UNIVERSE_AVAIL_TTL = 6 * 3600  # exchangeInfo cache
 
 
@@ -55,7 +59,7 @@ class Engine:
                  tg: Optional[nt.Telegram] = None):
         self.cfg = cfg
         self.dry_run = dry_run
-        self.audit = Audit(REPO / "audit")
+        self.audit = Audit(AUDIT_DIR)
         self.instances: Dict[str, Instance] = {}
         self.tg = tg
         self._available: Optional[set] = None
@@ -166,13 +170,18 @@ class Engine:
             instances_src = copy.deepcopy(self.instances) if self.dry_run else self.instances
             raw_actions: List = []
             detections: List[dict] = []
+            candles_by_key: Dict[tuple, list] = {}
             for pair, res in zip(pairs, results):
-                sym = pair.split("/")[0]
+                # store the full Binance symbol (ORCAUSDT) — messages, charts,
+                # probe fetches and ticker calls all need it (bare ORCA broke
+                # chart fetches 503 and made every probe miss, 2026-09-16)
+                sym = pair.split("/")[0] + "USDT"
                 for tf in self.cfg.timeframes:
                     r = res.get(tf)
                     if r is None:
                         errors.append(f"{sym}:{tf} no data")
                         continue
+                    candles_by_key[(sym, tf)] = r["candles"]
                     acts = update_for_scan(
                         instances_src, sym, tf, r["candidates"], r["candles"],
                         TF_MS[tf], now_s, self.cfg,
@@ -187,7 +196,7 @@ class Engine:
             if self.cfg.best_only_per_coin_tf:
                 raw_actions = best_per_coin_tf(raw_actions)
 
-            sends = await self._dispatch(raw_actions, ses)
+            sends = await self._dispatch(raw_actions, ses, candles_by_key)
             actions = [{"kind": a.kind,
                         "id": a.instance.id if a.instance else None,
                         "detail": a.detail}
@@ -207,7 +216,8 @@ class Engine:
         return {"summary": summary, "report": str(path)}
 
     # ── dispatch ───────────────────────────────────────────────────────
-    async def _dispatch(self, raw_actions: List, ses) -> List[dict]:
+    async def _dispatch(self, raw_actions: List, ses,
+                        candles_by_key: Dict[tuple, list]) -> List[dict]:
         sends: List[dict] = []
         for a in raw_actions:
             if a.kind == "skip_create":
@@ -222,6 +232,13 @@ class Engine:
                     # compressions flush out (user rule 2026-09-16).
                     self.audit.write({"event": "notify_held", "kind": kind,
                                       "id": inst.id, "dry": self.dry_run})
+                    continue
+                # candle-problem gate (user rule 2026-09-16): anomalous gaps in
+                # the last 30 candles → no notification (held for retry)
+                candles = candles_by_key.get((inst.symbol, inst.tf)) or []
+                if has_candle_problems(candles):
+                    self.audit.write({"event": "candle_problems", "kind": kind,
+                                      "id": inst.id, "action": "suppress"})
                     continue
                 caption = nt.fmt_compression(inst)
                 last = inst.pivots[-1]["bar"] if inst.pivots else 0
@@ -244,6 +261,12 @@ class Engine:
                     self.audit.write({"event": "notify_suppressed", "kind": kind,
                                       "id": inst.id, "side": detail.get("side"),
                                       "dry": self.dry_run})
+                    continue
+                candles = candles_by_key.get((inst.symbol, inst.tf)) or []
+                if has_candle_problems(candles):
+                    self.audit.write({"event": "candle_problems", "kind": kind,
+                                      "id": inst.id, "side": detail.get("side"),
+                                      "action": "suppress"})
                     continue
                 caption = nt.fmt_breakout(inst, detail["side"], detail["boundary"])
                 img = await self._chart(ses, inst, [detail["boundary"]])
@@ -288,6 +311,11 @@ class Engine:
                 await asyncio.sleep(CHART_SPACING_S - dt)
             img = await nt.fetch_chart(ses, self.cfg.chart_url, inst.symbol,
                                        inst.tf, lines)
+            if img is None:
+                # one retry before the text-only fallback
+                await asyncio.sleep(CHART_RETRY_DELAY_S)
+                img = await nt.fetch_chart(ses, self.cfg.chart_url, inst.symbol,
+                                           inst.tf, lines)
             self._chart_last = time.time()
             return img
 
@@ -318,7 +346,16 @@ class Engine:
             abs_bar = open_ms // tf_ms
             side = inst.beyond_side(abs_bar, price,
                                     self.cfg.breakout_buffer_atr * inst.atr)
+            self.audit.write({"event": "probe", "id": inst.id, "tf": inst.tf,
+                              "live": price, "side": side or ""})
             if side is None:
+                continue
+            # candle-problem gate (daw-breakouts parity): fresh 31-kline check
+            # before posting the heads-up — anomalous gaps suppress the alert
+            rows = await fetch_klines(ses, inst.symbol, inst.tf, 31)
+            if has_candle_problems(rows):
+                self.audit.write({"event": "candle_problems", "kind": "probe",
+                                  "id": inst.id, "action": "suppress"})
                 continue
             boundary = inst.upper_at(abs_bar) if side == "up" else inst.lower_at(abs_bar)
             caption = nt.fmt_breakout(inst, side, boundary)

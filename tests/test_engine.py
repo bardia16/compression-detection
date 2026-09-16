@@ -49,10 +49,13 @@ class FakeTG:
 
 
 @pytest.fixture
-def cfg(tmp_path):
+def cfg(tmp_path, monkeypatch):
     c = Config.load()
     c.timeframes = ["15m"]
     c.state_path = tmp_path / "structure_state.json"
+    # isolate audit + report writers (tests must not pollute prod dirs)
+    monkeypatch.setattr(eng_mod, "REPORTS_DIR", tmp_path / "reports")
+    monkeypatch.setattr(eng_mod, "AUDIT_DIR", tmp_path / "audit")
     return c
 
 
@@ -77,6 +80,10 @@ def patch_env(monkeypatch, closes, last_price=None):
     async def no_chart(self, ses, inst, lines):
         return None
     monkeypatch.setattr(eng_mod.Engine, "_chart", no_chart)
+
+    # Synthetic sine candles are not realistic for the candle-problem gate
+    # (open==close per candle reads as gaps); gate tests override this to True.
+    monkeypatch.setattr(eng_mod, "has_candle_problems", lambda candles: False)
 
 
 def scan(cfg, tg=None, dry=False):
@@ -155,6 +162,56 @@ def test_held_notifications_flush_on_enable(cfg, monkeypatch):
     assert "Compression" in tg.posts[0] and "boundaries" in tg.posts[0]
     inst2 = list(e2.instances.values())[0]
     assert inst2.notified["compression"] is True
+
+
+def test_symbols_stored_full_binance_form(cfg, monkeypatch):
+    """Instances carry the full symbol (AAAUSDT) — bare AAA broke charts,
+    ticker calls and probe fetches (2026-09-16)."""
+    patch_env(monkeypatch, box_closes())
+    e, res = scan(cfg)
+    inst = list(e.instances.values())[0]
+    assert inst.symbol == "AAAUSDT"
+
+
+def test_candle_gate_holds_compression(cfg, monkeypatch):
+    tg = FakeTG()
+    patch_env(monkeypatch, box_closes())
+    monkeypatch.setattr(eng_mod, "has_candle_problems", lambda candles: True)
+    e, res = scan(cfg, tg=tg)
+    assert tg.posts == []
+    inst = list(e.instances.values())[0]
+    assert inst.notified["compression"] is False       # held for retry
+    assert any(a["kind"] == "compression_notify"
+               for a in res["summary"]["actions"])     # action existed, gated
+
+
+def test_candle_gate_holds_then_sends_when_clean(cfg, monkeypatch):
+    tg = FakeTG()
+    patch_env(monkeypatch, box_closes())
+    monkeypatch.setattr(eng_mod, "has_candle_problems", lambda candles: True)
+    scan(cfg, tg=tg)
+    assert tg.posts == []                              # suppressed while dirty
+
+    monkeypatch.setattr(eng_mod, "has_candle_problems", lambda candles: False)
+    scan(cfg, tg=tg)
+    assert len(tg.posts) == 1                          # flush once clean
+
+
+def test_probe_candle_gate_suppresses(cfg, monkeypatch):
+    tg = FakeTG()
+    cfg.notif_enabled = True
+    patch_env(monkeypatch, box_closes())
+    e, _ = scan(cfg, tg=tg)
+
+    open_ms = mk_candles(box_closes())[-1].ts + STEP
+    monkeypatch.setattr(eng_mod, "probe_due", lambda *a, **kw: open_ms)
+    patch_env(monkeypatch, box_closes(), last_price=103.6)
+    monkeypatch.setattr(eng_mod, "has_candle_problems", lambda candles: True)
+    n = asyncio.run(e.probe_once(None))
+    assert n == 0
+    assert not any("Breakout" in p for p in tg.posts)
+    inst = list(e.instances.values())[0]
+    assert inst.probe_msg_id is None                   # heads-up suppressed
 
 
 def test_probe_posts_heads_up_and_retracts_on_failed_close(cfg, monkeypatch):

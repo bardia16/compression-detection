@@ -268,8 +268,8 @@ class Engine:
                                       "id": inst.id, "side": detail.get("side"),
                                       "action": "suppress"})
                     continue
-                caption = nt.fmt_breakout(inst, detail["side"], detail["boundary"])
-                img = await self._chart(ses, inst, [detail["boundary"]])
+                caption = nt.fmt_breakout(inst, detail["side"], detail["level"])
+                img = await self._chart(ses, inst, [detail["level"]])
                 mid = None
                 if img is not None:
                     mid = await self.tg.post_photo(caption, img)
@@ -343,9 +343,7 @@ class Engine:
             if price <= 0:
                 self.audit.write({"event": "probe_miss", "id": inst.id})
                 continue
-            abs_bar = open_ms // tf_ms
-            side = inst.beyond_side(abs_bar, price,
-                                    self.cfg.breakout_buffer_atr * inst.atr)
+            side = inst.beyond_side(price, self.cfg.breakout_buffer_atr * inst.atr)
             self.audit.write({"event": "probe", "id": inst.id, "tf": inst.tf,
                               "live": price, "side": side or ""})
             if side is None:
@@ -357,9 +355,12 @@ class Engine:
                 self.audit.write({"event": "candle_problems", "kind": "probe",
                                   "id": inst.id, "action": "suppress"})
                 continue
-            boundary = inst.upper_at(abs_bar) if side == "up" else inst.lower_at(abs_bar)
-            caption = nt.fmt_breakout(inst, side, boundary)
-            img = await self._chart(ses, inst, [boundary])
+            # level = last pivot in that direction (user rule 2026-09-16)
+            level = inst.last_high_price() if side == "up" else inst.last_low_price()
+            if level is None:      # defensive; side != None implies the level exists
+                continue
+            caption = nt.fmt_breakout(inst, side, level)
+            img = await self._chart(ses, inst, [level])
             mid = None
             if img is not None:
                 mid = await self.tg.post_photo(caption, img)
@@ -371,7 +372,7 @@ class Engine:
                 inst.probe_side = side
                 posted += 1
                 self.audit.write({"event": "probe_post", "id": inst.id,
-                                  "side": side, "boundary": boundary, "msg_id": mid})
+                                  "side": side, "level": level, "msg_id": mid})
         if dirty:
             self._save_state()
         return posted

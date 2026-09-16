@@ -50,6 +50,10 @@ class Config:
     def established_extra_pivots(self):
         return self.det.established_extra_pivots
 
+    @property
+    def min_boundary_hits(self):
+        return self.det.min_boundary_hits
+
     @classmethod
     def load(cls, path: Optional[Path] = None) -> "Config":
         p = Path(path) if path else DEFAULT_PATH
@@ -66,6 +70,7 @@ class Config:
             max_width_bounce_frac=float(det_raw["max_width_bounce_frac"]),
             confirm_extra_pivots=int(det_raw["confirm_extra_pivots"]),
             established_extra_pivots=int(det_raw["established_extra_pivots"]),
+            min_boundary_hits=int(det_raw.get("min_boundary_hits", 2)),
             selection_order=tuple(det_raw.get("selection_order") or ALL_TYPES),
         )
 

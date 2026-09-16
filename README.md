@@ -23,8 +23,21 @@ compression + breakout alerts to the **Breakouts** Telegram channel
   the structure TF's candle close** — if price is breaking → heads-up
   post. At the close a verdict runs: confirmed close beyond → message
   STAYS (breakout record); failed close → message DELETED, structure
-  stays active. Breakout = candle **close** beyond boundary; wicks never
+  stays active. Breakout = candle **close** beyond the level; wicks never
   count. Structure confirmation uses **closed candles only**.
+- **Breakout level (user rule 2026-09-16):** the price level shown and
+  checked is the **last confirmed pivot in that direction** — e.g. the
+  last EH for a range's long side, the last LH for a descending
+  triangle's up-break, the last EL/HL for shorts. NOT the boundary line
+  extrapolated to the break bar. Fitted boundary lines remain for
+  geometry (slopes/convergence) and chart range display only.
+- **Boundary-hit requirement (spec 2026-09-16):** a structure cannot
+  reach CONFIRMED (or beyond) until at least one of its boundaries has
+  **≥2 distinct confirmed pivot hits** (`min_boundary_hits` in config).
+  Hits = confirmed pivots carrying that boundary's canonical label
+  (EH/EL · LH/EL · EH/HL · LH/HL · LH/LL · HH/HL). Counts are exposed
+  per instance as `upper_hits` / `lower_hits` (+ `hit_requirement`,
+  `hit_boundary` in candidate metrics). Live pivots never count.
 
 ## Ops
 

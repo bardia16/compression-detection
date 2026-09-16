@@ -170,7 +170,7 @@ Events: (1) compression reached notify threshold; (2) breakout — two-stage (ap
 Post 1 per instance per event; `notified` flags + `msg_ids` in state; survives restart.
 
 - Same bot token 8517752196 ("Trading alerts bot"), chat `-1004330149150` (Breakouts channel) — values live in project `.env` (gitignored) exported by the pm2 wrapper (`run_compression.sh`: `set -a; . .env; set +a; exec venv/bin/python -u -m compression_detection.engine`).
-- Chart: `GET {chart_url}/chart/alert?symbol=&timeframe=&cross_lines=u,l` — horizontal dashed lines are all :8002 supports; use boundary values at the latest closed bar (box: exact; sloped: current-value approximation). NOTE: sloped-line support in chart-generation = optional phase-2.
+- Chart: `GET {chart_url}/chart/alert?symbol=&timeframe=&cross_lines=u,l` — horizontal dashed lines are all :8002 supports; compression messages use boundary values at the latest closed bar; breakout messages (post-A1) draw the last-pivot level line. NOTE: sloped-line support in chart-generation = optional phase-2.
 - **Mock step (mandatory, his standing rule):** send 2–3 candidate formats for compression + 2–3 for breakout as inline text blocks; implement the approved EXACT strings; add an equality test pinning the format.
 - Draft starting points (for the mock, not final):
   - Compression: `🔷 <b>BTCUSDT</b> — 4H Compression · Falling Wedge` + `🎯 64.1 → 66.8 contracting`
@@ -232,3 +232,11 @@ Post 1 per instance per event; `notified` flags + `msg_ids` in state; survives r
 
 ## 9. Acceptance checklist (from spec §30, §29)
 Every candidate answers: type; establishing pivots; count; detected/confirmed/established; upper/lower boundaries; flat/rising/falling; converging?; still valid?; break event definition; breakout occurred/direction; interactions count — all as structured JSON. Prohibitions respected: no label-only classification, no trend→wedge confusion, no exact equality, no wick breakouts, no unconfirmed pivots, no assumed direction, no lock-in, no invalidation/breakout confusion, no hardcoded tolerances (all config), no visual judgment.
+
+## 10. Amendments after approval (2026-09-16)
+
+**A1 — Breakout level = last pivot in that direction (Bardia, live fix).**
+Probe + close checks compare against the **newest confirmed pivot price on the broken side** (up → last high-side pivot, e.g. last EH/LH/HH; down → last low-side pivot). Fitted boundary lines remain for geometry (slopes/convergence/fit_err) and the compression message's range display ONLY. PENGU case that triggered this: line-at-bar 0.00683984 vs last LH 0.006859 (user: "a bit higher... from the last pivot in that direction"). Regression test: `test_level_not_extrapolated_boundary_line`; guard parity: `_already_broken_side` uses the same pivot levels. Action detail key renamed `boundary` → `level` (old events in state keep the historical key).
+
+**A2 — Global boundary-hit requirement (spec: Add Minimum Confirmed Boundary-Hit Requirement).**
+`[detection] min_boundary_hits = 2`. Hits = distinct **confirmed** pivots carrying that boundary's canonical label (label sets from TYPE_SPECS; live pivots can never appear — windows are built from confirmed pivots only). `state_for_candidate()`: below requirement → stays DETECTED even at confirmed/established levels; exposes `upper_hits`, `lower_hits`, `hit_requirement`, `hit_boundary` in candidate/instance metrics (spec §17 debug exposure). Since the label gate + alternation already imply ≥2 canonical pivots on one side at confirm-open counts, this is a formal, explicit gate + counters (bites if label gate loosens or counts change). Tests: `test_state_for_candidate_hit_gate`, `test_hit_requirement_exposed_on_instance`, detector hits assertions.

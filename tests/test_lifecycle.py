@@ -7,7 +7,8 @@ import pytest
 
 from compression_detection import structure as st
 from compression_detection.detector import (
-    TYPE_BOX, TYPE_FALLING_WEDGE, TYPE_SYM_TRI, Candidate, PivotRef,
+    TYPE_BOX, TYPE_DESC_TRI, TYPE_FALLING_WEDGE, TYPE_SYM_TRI, TYPE_SPECS,
+    Candidate, PivotRef,
 )
 from compression_detection.lifecycle import (
     STATE_BREAKOUT, STATE_COMPRESSING, STATE_CONFIRMED, STATE_DETECTED,
@@ -19,12 +20,13 @@ from compression_detection.models import Candle
 
 TF_MS = 60_000
 MIN_PIVOTS = {
-    TYPE_BOX: 4, TYPE_SYM_TRI: 4, TYPE_FALLING_WEDGE: 5,
+    TYPE_BOX: 4, TYPE_DESC_TRI: 4, TYPE_SYM_TRI: 4, TYPE_FALLING_WEDGE: 5,
 }
 CFG = SimpleNamespace(
     min_pivots=MIN_PIVOTS,
     confirm_extra_pivots=1,
     established_extra_pivots=2,
+    min_boundary_hits=2,
     catchup_max_candles=8,
     breakout_buffer_atr=0.0,
     notify_min_state="confirmed",
@@ -37,7 +39,13 @@ def ref(bar, price, side, label=None):
 
 
 def mk_cand(type_name, refs, up=(0.0, 100.0), lo=(0.0, 90.0), atr=2.0):
-    meta = {"fit_err_atr": 0.1, "pivot_count": len(refs)}
+    spec = TYPE_SPECS[type_name]
+    upper_hit_set = {l.value for l in spec.upper_labels}
+    lower_hit_set = {l.value for l in spec.lower_labels}
+    uh = sum(1 for r in refs if r.is_high and r.label in upper_hit_set)
+    lh = sum(1 for r in refs if not r.is_high and r.label in lower_hit_set)
+    meta = {"fit_err_atr": 0.1, "pivot_count": len(refs),
+            "upper_hits": uh, "lower_hits": lh}
     return Candidate(
         type=type_name, refs=refs,
         upper=st.Line(slope=up[0], intercept=up[1], base_bar=0.0),
@@ -110,12 +118,16 @@ def test_detected_only_then_upgrade_notifies():
     assert actions == []                      # detected < confirmed: silent
     inst = list(instances.values())[0]
     assert inst.state == STATE_DETECTED
+    # boundary-hit requirement: 1 EH + 1 EL -> not yet satisfied
+    assert inst.metrics["upper_hits"] == 1 and inst.metrics["lower_hits"] == 1
 
     refs5, cand5 = box_refs(n=5)
     actions2 = update_for_scan(instances, "AAA", "15m", [cand5], [], TF_MS, 1060, CFG)
     kinds = [a.kind for a in actions2]
     assert "upgrade" in kinds and "compression_notify" in kinds
     assert inst.state == STATE_CONFIRMED
+    # second EH confirmed -> requirement satisfied (2 hits on the upper)
+    assert inst.metrics["upper_hits"] == 2
 
 
 def test_established_upgrades_to_compressing_single_notify():
@@ -266,8 +278,8 @@ def test_stale_probe_gets_retracted():
 
 
 def test_verdict_uses_pre_update_boundary():
-    """Close beyond OLD boundary fires even when the same scan brings a
-    candidate that would shift the boundary (real-time semantics)."""
+    """Close beyond the OLD pivot levels fires even when the same scan brings
+    a candidate that would shift the boundary (real-time semantics)."""
     refs, cand = box_refs(n=4)
     instances = {}
     update_for_scan(instances, "AAA", "15m", [cand], [], TF_MS, 1000, CFG)
@@ -304,6 +316,67 @@ def test_idempotent_double_evaluation():
     # same call again — candle already evaluated (and instance terminal)
     a2 = evaluate_closed_candles(inst, [c], TF_MS, 1060, CFG)
     assert a2 == []
+
+
+# ── breakout levels = last pivot in that direction (2026-09-16) ────────
+
+def test_breakout_level_is_last_pivot_price():
+    refs, cand = box_refs(n=4)
+    inst = mk_instance(cand)
+    actions = evaluate_closed_candles(inst, [candle(31, 101.0)], TF_MS, 1000, CFG)
+    assert actions[0].detail["level"] == 100.5        # last EH, not line (100.0)
+
+    refs2, cand2 = box_refs(n=4)
+    inst2 = mk_instance(cand2)
+    actions2 = evaluate_closed_candles(inst2, [candle(31, 89.0)], TF_MS, 1000, CFG)
+    assert actions2[0].detail["level"] == 90.5        # last EL
+
+
+def test_level_not_extrapolated_boundary_line():
+    """Descending upper boundary: the line keeps falling below the last LH
+    pivot — the pivot price is the level, not the line at the break bar."""
+    refs = [ref(10, 100.0, "H"), ref(14, 90.0, "L"),
+            ref(18, 96.0, "H", "LH"), ref(22, 90.2, "L", "EL")]
+    cand = mk_cand(TYPE_DESC_TRI, refs, up=(-0.5, 105.0), lo=(0.0, 90.0))
+    # line at bar 31 = 105 - 0.5*31 = 89.5 -> a line-based check would fire at 95
+    inst = mk_instance(cand)
+    assert evaluate_closed_candles(inst, [candle(31, 95.0)], TF_MS, 1000, CFG) == []
+    assert inst.state != STATE_BREAKOUT
+
+    inst2 = mk_instance(cand)
+    actions = evaluate_closed_candles(inst2, [candle(31, 97.0)], TF_MS, 1000, CFG)
+    assert [a.kind for a in actions] == ["breakout_post"]
+    assert actions[0].detail["level"] == 96.0         # last LH pivot price
+
+
+def test_probe_level_is_last_pivot_price():
+    refs, cand = box_refs(n=4)
+    inst = mk_instance(cand)
+    assert inst.beyond_side(100.4, 0.0) is None       # between line (100) and EH (100.5)
+    assert inst.beyond_side(100.6, 0.0) == "up"
+    assert inst.beyond_side(90.6, 0.0) is None        # between EL (90.5) and line (90)
+    assert inst.beyond_side(90.3, 0.0) == "down"
+
+
+# ── boundary-hit requirement (2026-09-16) ──────────────────────────────
+
+def test_state_for_candidate_hit_gate():
+    from compression_detection.lifecycle import state_for_candidate
+    # hits satisfied on either boundary -> level decides
+    assert state_for_candidate("confirmed", {"upper_hits": 2, "lower_hits": 0}, CFG) == STATE_CONFIRMED
+    assert state_for_candidate("established", {"upper_hits": 0, "lower_hits": 3}, CFG) == STATE_COMPRESSING
+    # below requirement -> stays DETECTED even at confirmed/established levels
+    assert state_for_candidate("confirmed", {"upper_hits": 1, "lower_hits": 1}, CFG) == STATE_DETECTED
+    assert state_for_candidate("established", {"upper_hits": 1, "lower_hits": 0}, CFG) == STATE_DETECTED
+    # detected level never confirms regardless of hits
+    assert state_for_candidate("detected", {"upper_hits": 5, "lower_hits": 5}, CFG) == STATE_DETECTED
+
+
+def test_hit_requirement_exposed_on_instance():
+    refs, cand = box_refs(n=6)
+    inst = mk_instance(cand)
+    assert inst.metrics["upper_hits"] == 2 and inst.metrics["lower_hits"] == 2
+    assert inst.state == STATE_COMPRESSING            # 6 pivots + gate satisfied
 
 
 # ── creation guards ────────────────────────────────────────────────────

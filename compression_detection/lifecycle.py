@@ -68,6 +68,20 @@ def state_for_level(level: str) -> str:
     return _LEVEL_TO_STATE[level]
 
 
+def state_for_candidate(level: str, metrics: dict, cfg) -> str:
+    """Level + the global boundary-hit gate (spec 2026-09-16): a structure
+    cannot reach CONFIRMED (or beyond) until at least one of its boundaries
+    has >= `min_boundary_hits` distinct CONFIRMED pivot hits. Below the
+    requirement it stays DETECTED (live pivots never count — they are not
+    in the window at all)."""
+    if level == LEVEL_DETECTED:
+        return STATE_DETECTED
+    hits = max(int(metrics.get("upper_hits", 0)), int(metrics.get("lower_hits", 0)))
+    if hits < int(getattr(cfg, "min_boundary_hits", 2)):
+        return STATE_DETECTED
+    return _LEVEL_TO_STATE[level]
+
+
 @dataclass
 class Action:
     """Something the engine must do as a result of a lifecycle decision.
@@ -130,11 +144,30 @@ class Instance:
     def lower_at(self, abs_bar: float) -> float:
         return self.lower_line.at(abs_bar)
 
-    def beyond_side(self, abs_bar: float, price: float, buffer: float) -> Optional[str]:
-        """Which boundary (if any) the price is beyond right now."""
-        if price > self.upper_at(abs_bar) + buffer:
+    def last_high_price(self) -> Optional[float]:
+        """Newest confirmed high-side pivot price — THE long breakout level
+        (user rule 2026-09-16: the level is the last pivot in that
+        direction, e.g. the last EH, NOT the boundary line extrapolated
+        to the current bar)."""
+        for p in reversed(self.pivots):
+            if p["side"] == "H":
+                return p["price"]
+        return None
+
+    def last_low_price(self) -> Optional[float]:
+        """Newest confirmed low-side pivot price — the short breakout level."""
+        for p in reversed(self.pivots):
+            if p["side"] == "L":
+                return p["price"]
+        return None
+
+    def beyond_side(self, price: float, buffer: float) -> Optional[str]:
+        """Which pivot level (if any) the price is beyond right now."""
+        up = self.last_high_price()
+        lo = self.last_low_price()
+        if up is not None and price > up + buffer:
             return "up"
-        if price < self.lower_at(abs_bar) - buffer:
+        if lo is not None and price < lo - buffer:
             return "down"
         return None
 
@@ -192,7 +225,7 @@ def create_instance(
     inst = Instance(
         id=instance_id(symbol, tf, cand.type, cand.first_ts),
         symbol=symbol, tf=tf, type=cand.type,
-        state=state_for_level(level), level=level,
+        state=state_for_candidate(level, cand.metrics, cfg), level=level,
         created_ts=now_s, anchor_ts=cand.first_ts,
         last_scan_ts=now_s, last_eval_ts=0,
         pivots=[r.to_dict() for r in cand.refs],
@@ -226,7 +259,7 @@ def _apply_candidate(inst: Instance, cand: Candidate, now_s: int, cfg) -> List[A
     inst.last_scan_ts = now_s
 
     new_level = level_for(cand.pivot_count, cand.type, cfg)
-    new_state = state_for_level(new_level)
+    new_state = state_for_candidate(new_level, cand.metrics, cfg)
     if new_state != inst.state:
         old = inst.state
         inst.state, inst.level = new_state, new_level
@@ -268,38 +301,40 @@ def evaluate_closed_candles(
     late_cutoff = new[-1].ts - 2 * tf_ms
 
     buffer = cfg.breakout_buffer_atr * inst.atr
+    # Breakout levels are PIVOT PRICES, not extrapolated boundary values
+    # (user rule 2026-09-16): up = newest confirmed high-side pivot (e.g.
+    # the last EH / LH / HH); down = newest confirmed low-side pivot.
+    up_level = inst.last_high_price()
+    lo_level = inst.last_low_price()
 
     for c in new:
-        abs_bar = c.ts // tf_ms
-        up = inst.upper_at(abs_bar)
-        lo = inst.lower_at(abs_bar)
-        beyond_up = c.close > up + buffer
-        beyond_dn = c.close < lo - buffer
+        beyond_up = up_level is not None and c.close > up_level + buffer
+        beyond_dn = lo_level is not None and c.close < lo_level - buffer
         late = c.ts < late_cutoff
 
         if inst.probe_msg_id is not None and inst.probe_candle_ms == c.ts:
             # verdict for the posted heads-up
             if inst.probe_side == "up" and beyond_up:
                 actions.append(Action("breakout_keep", inst, {
-                    "side": "up", "boundary": up, "close": c.close,
+                    "side": "up", "level": up_level, "close": c.close,
                     "candle_ts": c.ts, "late": late, "msg_id": inst.probe_msg_id,
                 }))
                 inst.state = STATE_BREAKOUT
                 inst.notified["breakout"] = True
                 inst.add_event("breakout", int(c.ts // 1000), side="up", close=c.close,
-                               boundary=up, kept=True)
+                               level=up_level, kept=True)
                 inst.probe_msg_id = None
                 inst.last_eval_ts = new[-1].ts
                 return actions
             if inst.probe_side == "down" and beyond_dn:
                 actions.append(Action("breakout_keep", inst, {
-                    "side": "down", "boundary": lo, "close": c.close,
+                    "side": "down", "level": lo_level, "close": c.close,
                     "candle_ts": c.ts, "late": late, "msg_id": inst.probe_msg_id,
                 }))
                 inst.state = STATE_BREAKOUT
                 inst.notified["breakout"] = True
                 inst.add_event("breakout", int(c.ts // 1000), side="down", close=c.close,
-                               boundary=lo, kept=True)
+                               level=lo_level, kept=True)
                 inst.probe_msg_id = None
                 inst.last_eval_ts = new[-1].ts
                 return actions
@@ -315,15 +350,15 @@ def evaluate_closed_candles(
             # opposite-direction close = a genuine breakout the other way
             if beyond_up or beyond_dn:
                 side = "up" if beyond_up else "down"
-                boundary = up if beyond_up else lo
+                level = up_level if beyond_up else lo_level
                 actions.append(Action("breakout_post", inst, {
-                    "side": side, "boundary": boundary, "close": c.close,
+                    "side": side, "level": level, "close": c.close,
                     "candle_ts": c.ts, "late": late,
                 }))
                 inst.state = STATE_BREAKOUT
                 inst.notified["breakout"] = True
                 inst.add_event("breakout", int(c.ts // 1000), side=side, close=c.close,
-                               boundary=boundary, kept=False)
+                               level=level, kept=False)
                 inst.last_eval_ts = new[-1].ts
                 return actions
             continue
@@ -331,15 +366,15 @@ def evaluate_closed_candles(
         # no pending probe for this candle
         if beyond_up or beyond_dn:
             side = "up" if beyond_up else "down"
-            boundary = up if beyond_up else lo
+            level = up_level if beyond_up else lo_level
             actions.append(Action("breakout_post", inst, {
-                "side": side, "boundary": boundary, "close": c.close,
+                "side": side, "level": level, "close": c.close,
                 "candle_ts": c.ts, "late": late,
             }))
             inst.state = STATE_BREAKOUT
             inst.notified["breakout"] = True
             inst.add_event("breakout", int(c.ts // 1000), side=side, close=c.close,
-                           boundary=boundary, kept=False)
+                           level=level, kept=False)
             inst.last_eval_ts = new[-1].ts
             return actions
 
@@ -452,23 +487,24 @@ def update_for_scan(
 
 
 def _already_broken_side(cand: Candidate, closed_candles, tf_ms: int, cfg) -> Optional[str]:
-    """Which boundary the price already breached after the window's last
-    pivot — None when all post-pivot closes sit inside the boundaries.
+    """Which PIVOT LEVEL the price already breached after the window's last
+    pivot — None when all post-pivot closes sit inside.
 
-    Uses the same predicate as live breakout detection (parity: if a candle
-    would have been an alert while watching, the structure is not createable).
-    """
+    Parity with live breakout detection (same pivot-price levels): if a
+    candle would have been an alert while watching, the structure is not
+    createable."""
     if not closed_candles:
         return None
+    up_level = next((r.price for r in reversed(cand.refs) if r.is_high), None)
+    lo_level = next((r.price for r in reversed(cand.refs) if not r.is_high), None)
     last_ts = cand.refs[-1].ts
     buffer = cfg.breakout_buffer_atr * cand.atr
     for c in closed_candles:
         if c.ts <= last_ts:
             continue
-        ab = c.ts // tf_ms
-        if c.close > cand.upper.at(ab) + buffer:
+        if up_level is not None and c.close > up_level + buffer:
             return "up"
-        if c.close < cand.lower.at(ab) - buffer:
+        if lo_level is not None and c.close < lo_level - buffer:
             return "down"
     return None
 

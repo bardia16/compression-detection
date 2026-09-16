@@ -67,6 +67,10 @@ def test_box_min_4_pivots():
     box = [c for c in cands if c.type == TYPE_BOX][0]
     assert box.pivot_count == 4
     assert box.upper_class == st.FLAT and box.lower_class == st.FLAT
+    # 1 EH + 1 EL -> boundary-hit requirement not yet satisfied (4 pivots)
+    assert box.metrics["upper_hits"] == 1 and box.metrics["lower_hits"] == 1
+    assert box.metrics["hit_requirement"] is False
+    assert box.metrics["hit_boundary"] == ""
 
 
 def test_box_larger_window_ranked_first():
@@ -80,6 +84,11 @@ def test_box_larger_window_ranked_first():
     ], last_bar=32)
     assert cands[0].type == TYPE_BOX
     assert cands[0].pivot_count == 6
+    # second EH + second EL -> requirement satisfied
+    assert cands[0].metrics["upper_hits"] == 2
+    assert cands[0].metrics["lower_hits"] == 2
+    assert cands[0].metrics["hit_requirement"] is True
+    assert cands[0].metrics["hit_boundary"] == "upper"
 
 
 def test_descending_triangle():
@@ -131,6 +140,10 @@ def test_falling_wedge_converging():
     fw = [c for c in cands if c.type == TYPE_FALLING_WEDGE][0]
     assert fw.upper_class == st.FALLING and fw.lower_class == st.FALLING
     assert fw.metrics["convergence_rate"] > 0.25
+    # 2 LH on the upper boundary -> requirement satisfied at min pivots
+    assert fw.metrics["upper_hits"] == 2 and fw.metrics["lower_hits"] == 1
+    assert fw.metrics["hit_requirement"] is True
+    assert fw.metrics["hit_boundary"] == "upper"
 
 
 def test_rising_wedge_converging():
@@ -145,6 +158,10 @@ def test_rising_wedge_converging():
     rw = [c for c in cands if c.type == TYPE_RISING_WEDGE][0]
     assert rw.upper_class == st.RISING and rw.lower_class == st.RISING
     assert rw.metrics["convergence_rate"] > 0.25
+    # 2 HL on the lower boundary -> requirement satisfied at min pivots
+    assert rw.metrics["lower_hits"] == 2 and rw.metrics["upper_hits"] == 1
+    assert rw.metrics["hit_requirement"] is True
+    assert rw.metrics["hit_boundary"] == "lower"
 
 
 def test_first_of_side_label_exempt():

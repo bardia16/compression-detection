@@ -19,6 +19,7 @@ def test_detection_config_defaults():
     assert det.min_pivots["falling_wedge"] == 5
     assert det.confirm_extra_pivots == 1
     assert det.established_extra_pivots == 2
+    assert det.min_boundary_hits == 2
     assert det.flat_tol_atr == 1.0
     assert det.boundary_tol_atr == 1.0
     assert det.min_convergence_pct == 25.0

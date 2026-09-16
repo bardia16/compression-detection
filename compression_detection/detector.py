@@ -97,6 +97,7 @@ class DetectConfig:
     max_width_bounce_frac: float = 0.10
     confirm_extra_pivots: int = 1
     established_extra_pivots: int = 2
+    min_boundary_hits: int = 2
     selection_order: Tuple[str, ...] = ALL_TYPES
 
 
@@ -125,7 +126,7 @@ class Candidate:
     atr: float
     upper_class: str
     lower_class: str
-    metrics: Dict[str, float]
+    metrics: Dict[str, object]
 
     @property
     def pivot_count(self) -> int:
@@ -252,7 +253,7 @@ def _check_window(
     if upper_class not in spec.upper_slopes or lower_class not in spec.lower_slopes:
         return None
 
-    metrics: Dict[str, float] = {
+    metrics: Dict[str, object] = {
         "pivot_count": len(refs),
         "touches": int(sum(up_flags) + sum(lo_flags)),
         "fit_err_atr": st.fit_error(upper_pts, upper, atr) + st.fit_error(lower_pts, lower, atr),
@@ -262,6 +263,21 @@ def _check_window(
         "upper_at_last_bar": upper.at(refs[-1].abs_bar),
         "lower_at_last_bar": lower.at(refs[-1].abs_bar),
     }
+
+    # Boundary-hit counts (global confirmation rule, spec 2026-09-16):
+    # distinct CONFIRMED pivots carrying the boundary's canonical label.
+    # Live/developing pivots can never appear here — windows are built from
+    # confirmed pivots only. Confirmation (CONFIRMED and beyond) requires
+    # max(upper_hits, lower_hits) >= cfg.min_boundary_hits.
+    upper_hit_set = {l.value for l in spec.upper_labels}
+    lower_hit_set = {l.value for l in spec.lower_labels}
+    upper_hits = sum(1 for r in highs if r.label in upper_hit_set)
+    lower_hits = sum(1 for r in lows if r.label in lower_hit_set)
+    metrics["upper_hits"] = upper_hits
+    metrics["lower_hits"] = lower_hits
+    metrics["hit_requirement"] = max(upper_hits, lower_hits) >= cfg.min_boundary_hits
+    metrics["hit_boundary"] = ("upper" if upper_hits >= cfg.min_boundary_hits
+                               else "lower" if lower_hits >= cfg.min_boundary_hits else "")
 
     if spec.converging:
         sample_from = max(highs[0].abs_bar, lows[0].abs_bar)

@@ -55,13 +55,14 @@ def fmt_compression(inst) -> str:
     )
 
 
-def fmt_breakout(inst, side: str, boundary: float) -> str:
-    """Breakout heads-up / confirmed breakout (direction = actual event)."""
+def fmt_breakout(inst, side: str, level: float) -> str:
+    """Breakout heads-up / confirmed breakout (direction = actual event).
+    `level` = the last pivot in that direction (user rule 2026-09-16)."""
     arrow = "🟢" if side == "up" else "🔴"
     word = "above" if side == "up" else "below"
     return (
         f"{arrow} <b>{inst.symbol}</b> — {tf_label(inst.tf)} Compression  ·  Breakout\n"
-        f"🎯 closing <b>{word}</b> {_fmt_price(boundary)}"
+        f"🎯 closing <b>{word}</b> {_fmt_price(level)}"
     )
 
 

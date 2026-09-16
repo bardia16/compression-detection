@@ -25,6 +25,10 @@ def main() -> None:
     pe.add_argument("symbol")
     pe.add_argument("tf")
 
+    pr = sub.add_parser("rearm", help="clear compression-notify flags on active "
+                                      "instances so they flush on the next enabled scan")
+    pr.set_defaults(rearm=True)
+
     args = ap.parse_args()
 
     from .config import Config
@@ -33,6 +37,19 @@ def main() -> None:
 
     if args.cmd == "explain":
         asyncio.run(_explain(cfg, args.symbol.upper(), args.tf))
+        return
+
+    if args.cmd == "rearm":
+        from .engine import Engine
+        from .lifecycle import ACTIVE_STATES
+        eng = Engine(cfg, dry_run=False)
+        n = 0
+        for inst in eng.instances.values():
+            if inst.state in ACTIVE_STATES and inst.notified.get("compression"):
+                inst.notified["compression"] = False
+                n += 1
+        eng._save_state()
+        print(f"re-armed {n} active instances (flush on the next enabled scan)")
         return
 
     if args.cmd == "scan":

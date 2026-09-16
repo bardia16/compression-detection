@@ -138,6 +138,25 @@ def test_breakout_close_fires_end_to_end(cfg, monkeypatch):
     assert res3["summary"]["actions"] == []
 
 
+def test_held_notifications_flush_on_enable(cfg, monkeypatch):
+    """Warmup holds notifications (no flag consumed); enabling flushes the
+    current compressions (user rule 2026-09-16)."""
+    cfg.notif_enabled = False
+    tg = FakeTG()
+    patch_env(monkeypatch, box_closes())
+    e1, res1 = scan(cfg, tg=tg)                        # notifications disabled
+    assert tg.posts == []
+    inst1 = list(e1.instances.values())[0]
+    assert inst1.notified["compression"] is False      # held, not consumed
+
+    cfg.notif_enabled = True
+    e2, res2 = scan(cfg, tg=tg)
+    assert len(tg.posts) == 1
+    assert "Compression" in tg.posts[0] and "boundaries" in tg.posts[0]
+    inst2 = list(e2.instances.values())[0]
+    assert inst2.notified["compression"] is True
+
+
 def test_probe_posts_heads_up_and_retracts_on_failed_close(cfg, monkeypatch):
     tg = FakeTG()
     cfg.notif_enabled = True

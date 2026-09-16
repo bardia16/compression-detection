@@ -217,8 +217,10 @@ class Engine:
             kind = a.kind
             if kind == "compression_notify":
                 if not self.cfg.notif_enabled or self.dry_run or self.tg is None:
-                    inst.notified["compression"] = True
-                    self.audit.write({"event": "notify_suppressed", "kind": kind,
+                    # HOLD, never consume: warmup keeps the notification pending
+                    # (no flag write) — when notifications go live, the current
+                    # compressions flush out (user rule 2026-09-16).
+                    self.audit.write({"event": "notify_held", "kind": kind,
                                       "id": inst.id, "dry": self.dry_run})
                     continue
                 caption = nt.fmt_compression(inst)

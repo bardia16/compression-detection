@@ -1,12 +1,16 @@
 """Telegram notifications for compression + breakout events.
 
-Same bot as the Trading-Alerts scanner ("Trading alerts bot") posting
-into the Breakouts channel. Two-line message shape mirrors the approved
-S/R breakout format: title line + verdict line.
+Format approved by Bardia 2026-09-16 (the "A" suggestions — mirrors the
+existing S/R breakout channel format per the standing reuse rule, only
+the label changes):
 
-⚠️ The exact strings below are PLACEHOLDERS pending Bardia's mock
-approval — when he picks a format, update the fmt_* functions AND their
-equality tests together.
+  compression: `🔷 SYM — TF Compression · Type` / `🎯 boundaries lo – up`
+  breakout:    `🟢|🔴 SYM — TF Compression · Breakout` /
+               `🎯 closing above|below X`
+
+Same bot as the Trading-Alerts scanner ("Trading alerts bot") posting
+into the Breakouts channel. Changing these strings means updating the
+pinned equality tests in tests/test_notifier.py in the same edit.
 """
 from __future__ import annotations
 

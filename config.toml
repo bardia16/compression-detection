@@ -43,7 +43,7 @@ probe_loop_s = 30              # probe check cadence
 breakout_buffer_atr = 0.0      # live/close strictly beyond boundary
 
 [notifications]
-enabled = false                # flip to true after Bardia approves notification formats
+enabled = true                 # live since 2026-09-16 (held compressions flush on enable)
 notify_min_state = "confirmed" # compression message when instance reaches this state
 notify_on_compress_upgrade = false
 notify_invalidation = false

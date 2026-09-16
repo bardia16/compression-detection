@@ -47,9 +47,16 @@ def _fmt_price(v: float) -> str:
 
 
 def fmt_compression(inst) -> str:
-    """Compression detected (no direction yet — it is a compression)."""
-    lo = inst.metrics.get("lower_at_last_bar", inst.lower_at(inst.pivots[-1]["bar"]))
-    up = inst.metrics.get("upper_at_last_bar", inst.upper_at(inst.pivots[-1]["bar"]))
+    """Compression detected (no direction yet — it is a compression).
+    Boundaries: box → the last pivot levels (same values its flat chart
+    lines and breakout levels use); triangles/wedges → the fitted boundary
+    lines' current values (their chart draws the lines themselves)."""
+    if inst.type == "box":
+        lo, up = inst.last_low_price(), inst.last_high_price()
+    else:
+        last = inst.pivots[-1]["bar"] if inst.pivots else 0
+        lo = inst.metrics.get("lower_at_last_bar", inst.lower_at(last))
+        up = inst.metrics.get("upper_at_last_bar", inst.upper_at(last))
     return (
         f"🔷 <b>{inst.symbol}</b> — {tf_label(inst.tf)} Compression  ·  {pretty_type(inst.type)}\n"
         f"🎯 boundaries {_fmt_price(lo)} – {_fmt_price(up)}"

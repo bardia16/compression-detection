@@ -38,7 +38,8 @@ from .detector import detect_candidates
 from .dow import label_all_pivots
 from .fetcher import TF_MS, fetch_klines, fetch_last_price
 from .lifecycle import (
-    ACTIVE_STATES, TERMINAL_STATES, Instance, best_per_coin_tf, update_for_scan,
+    ACTIVE_STATES, TERMINAL_STATES, Instance, alert_level_for, best_per_coin_tf,
+    update_for_scan,
 )
 from .report import build_summary, format_summary_text, write_report
 from .timing import next_scan_ms, probe_due
@@ -241,13 +242,18 @@ class Engine:
                                       "id": inst.id, "action": "suppress"})
                     continue
                 caption = nt.fmt_compression(inst)
-                # chart: the actual boundary lines extrapolated from the
-                # pivots (sloped triangles/wedges; ~flat boxes) — replaces
-                # the old horizontal boundary-at-last-bar values
+                # chart (user rules 2026-09-16): triangles/wedges draw the
+                # extrapolated boundary LINES (from each side's first pivot);
+                # a box draws plain horizontals at its last pivot levels —
+                # no line extrapolation for ranges.
                 x2 = (candles[-1].ts + TF_MS[inst.tf]) if candles \
                     else inst.pivots[-1]["ts"]
-                segs = inst.trend_segments(TF_MS[inst.tf], x2)
-                img = await self._chart(ses, inst, [], segs)
+                if inst.type == "box":
+                    img = await self._chart(ses, inst, [
+                        inst.last_low_price(), inst.last_high_price()], None)
+                else:
+                    segs = inst.trend_segments(TF_MS[inst.tf], x2)
+                    img = await self._chart(ses, inst, [], segs)
                 mid = None
                 if img is not None:
                     mid = await self.tg.post_photo(caption, img)
@@ -276,8 +282,11 @@ class Engine:
                 caption = nt.fmt_breakout(inst, detail["side"], detail["level"])
                 x2 = (candles[-1].ts + TF_MS[inst.tf]) if candles \
                     else inst.pivots[-1]["ts"]
-                segs = inst.trend_segments(TF_MS[inst.tf], x2)
-                img = await self._chart(ses, inst, [detail["level"]], segs)
+                if inst.type == "box":
+                    img = await self._chart(ses, inst, [detail["level"]], None)
+                else:
+                    segs = inst.trend_segments(TF_MS[inst.tf], x2)
+                    img = await self._chart(ses, inst, [detail["level"]], segs)
                 mid = None
                 if img is not None:
                     mid = await self.tg.post_photo(caption, img)
@@ -352,7 +361,8 @@ class Engine:
             if price <= 0:
                 self.audit.write({"event": "probe_miss", "id": inst.id})
                 continue
-            side = inst.beyond_side(price, self.cfg.breakout_buffer_atr * inst.atr)
+            side = inst.beyond_side(price, self.cfg.breakout_buffer_atr * inst.atr,
+                                    open_ms // tf_ms)
             self.audit.write({"event": "probe", "id": inst.id, "tf": inst.tf,
                               "live": price, "side": side or ""})
             if side is None:
@@ -364,13 +374,17 @@ class Engine:
                 self.audit.write({"event": "candle_problems", "kind": "probe",
                                   "id": inst.id, "action": "suppress"})
                 continue
-            # level = last pivot in that direction (user rule 2026-09-16)
-            level = inst.last_high_price() if side == "up" else inst.last_low_price()
+            # level = last pivot in that direction for box/triangles, the
+            # boundary line for wedges (user rules 2026-09-16)
+            level = alert_level_for(inst, side, open_ms // tf_ms)
             if level is None:      # defensive; side != None implies the level exists
                 continue
             caption = nt.fmt_breakout(inst, side, level)
-            segs = inst.trend_segments(tf_ms, open_ms)
-            img = await self._chart(ses, inst, [level], segs)
+            if inst.type == "box":
+                img = await self._chart(ses, inst, [level], None)
+            else:
+                segs = inst.trend_segments(tf_ms, open_ms)
+                img = await self._chart(ses, inst, [level], segs)
             mid = None
             if img is not None:
                 mid = await self.tg.post_photo(caption, img)

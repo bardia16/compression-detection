@@ -19,6 +19,17 @@ def fake_inst():
     )
 
 
+def box_inst():
+    return SimpleNamespace(
+        symbol="BTCUSDT", tf="4h", type="box",
+        metrics={"lower_at_last_bar": 64.0, "upper_at_last_bar": 67.0},
+        pivots=[{"bar": 100, "side": "H", "price": 66.8},
+                {"bar": 96, "side": "L", "price": 64.12}],
+        last_low_price=lambda: 64.12, last_high_price=lambda: 66.8,
+        lower_at=lambda b: 64.0, upper_at=lambda b: 67.0,
+    )
+
+
 def test_tf_label():
     assert tf_label("15m") == "15m"
     assert tf_label("1h") == "1H"
@@ -35,6 +46,15 @@ def test_pretty_type():
 def test_fmt_compression_pinned():
     assert fmt_compression(fake_inst()) == (
         "🔷 <b>BTCUSDT</b> — 4H Compression  ·  Falling Wedge\n"
+        "🎯 boundaries 64.12 – 66.8"
+    )
+
+
+def test_fmt_compression_box_uses_last_pivot_levels():
+    """Box boundaries show the last pivot levels — same values its flat
+    chart lines and breakout levels use (user rule 2026-09-16)."""
+    assert fmt_compression(box_inst()) == (
+        "🔷 <b>BTCUSDT</b> — 4H Compression  ·  Box\n"
         "🎯 boundaries 64.12 – 66.8"
     )
 

@@ -15,6 +15,11 @@ Rules (spec §20-24, locked decisions 2026-09-16):
 - geometry dissolved without a breakout → INVALIDATED (never confused
   with BREAKOUT)
 - a structure is never locked: every scan re-evaluates (spec §18)
+- boundary semantics per family (user rules 2026-09-16):
+  box → alert levels = last pivot; flat boundaries, no extrapolation
+  triangles → alert levels = last pivot; a close through a boundary LINE
+    (without the level break) kills the pattern — it is a range from then
+  wedges → the LINE is the alert level (close beyond it = the breakout)
 
 This module is pure logic — no IO. The engine persists instances and
 executes the returned Actions (posts, deletes, state writes).
@@ -40,6 +45,48 @@ TERMINAL_STATES = (STATE_BREAKOUT, STATE_INVALIDATED)
 LEVEL_DETECTED = "detected"
 LEVEL_CONFIRMED = "confirmed"
 LEVEL_ESTABLISHED = "established"
+
+# ── boundary-level semantics per family (user rules 2026-09-16) ─────────
+#  box:       alert level = last pivot in that direction; boundaries are flat
+#  triangles: alert level = last pivot in that direction; a close through a
+#             boundary LINE (without a level break) KILLS the pattern — from
+#             that bar it is a range doing EH/EL, not a triangle anymore
+#  wedges:    the LINE is the alert level — a close beyond the line is the
+#             breakout itself
+_TRIANGLE_TYPES = {"descending_triangle", "ascending_triangle",
+                   "symmetrical_triangle"}
+_WEDGE_TYPES = {"falling_wedge", "rising_wedge"}
+_LINE_LEVEL_TYPES = _WEDGE_TYPES  # families whose alert level is the line
+
+
+def alert_level_for(inst, side: str, bar: int) -> Optional[float]:
+    """The level a breakout on `side` is measured against / displayed as:
+    the boundary line for wedges, the last pivot for box/triangles."""
+    if inst.type in _LINE_LEVEL_TYPES:
+        return inst.upper_at(bar) if side == "up" else inst.lower_at(bar)
+    return inst.last_high_price() if side == "up" else inst.last_low_price()
+
+
+def classify_close(inst, close: float, bar: int, buffer: float):
+    """(up_hit, dn_hit, line_side) for one close against an instance.
+
+    up_hit/dn_hit = the breakout predicate (pivot levels for box/triangles,
+    the boundary line for wedges). `line_side` = close beyond a boundary
+    LINE that did not hit the alert predicate — for triangles this means the
+    triangle's line is broken, the pattern is over (it becomes a range)."""
+    if inst.type in _LINE_LEVEL_TYPES:
+        up_v, lo_v = inst.upper_at(bar), inst.lower_at(bar)
+    else:
+        up_v, lo_v = inst.last_high_price(), inst.last_low_price()
+    up_hit = up_v is not None and close > up_v + buffer
+    dn_hit = lo_v is not None and close < lo_v - buffer
+    line_side = ""
+    if not up_hit and not dn_hit and inst.type in _TRIANGLE_TYPES:
+        if close > inst.upper_at(bar) + buffer:
+            line_side = "up"
+        elif close < inst.lower_at(bar) - buffer:
+            line_side = "down"
+    return up_hit, dn_hit, line_side
 
 _LEVEL_TO_STATE = {
     LEVEL_DETECTED: STATE_DETECTED,
@@ -161,10 +208,11 @@ class Instance:
                 return p["price"]
         return None
 
-    def beyond_side(self, price: float, buffer: float) -> Optional[str]:
-        """Which pivot level (if any) the price is beyond right now."""
-        up = self.last_high_price()
-        lo = self.last_low_price()
+    def beyond_side(self, price: float, buffer: float, bar: int) -> Optional[str]:
+        """Which side's alert level (if any) the live price is beyond:
+        wedges vs the boundary line, box/triangles vs the last pivot."""
+        up = alert_level_for(self, "up", bar)
+        lo = alert_level_for(self, "down", bar)
         if up is not None and price > up + buffer:
             return "up"
         if lo is not None and price < lo - buffer:
@@ -172,16 +220,18 @@ class Instance:
         return None
 
     def trend_segments(self, tf_ms: int, x2_ms: int) -> list:
-        """Boundary lines as (x1_ms, y1, x2_ms, y2) segments for the chart
-        (user rule 2026-09-16): the fitted boundary lines extrapolated from
-        the structure's first pivot to the chart's right edge — sloped for
-        triangles/wedges, ~flat for boxes."""
+        """Boundary lines for the chart (triangles/wedges): each fitted line
+        drawn from its OWN first pivot to the right edge — no left overhang
+        (user rule 2026-09-16)."""
         if not self.pivots:
             return []
-        x1 = self.pivots[0]["ts"]
+        h_ts = next((p["ts"] for p in self.pivots if p["side"] == "H"), None)
+        l_ts = next((p["ts"] for p in self.pivots if p["side"] == "L"), None)
         segs = []
-        for ln in (self.upper_line, self.lower_line):
-            segs.append((x1, ln.at(x1 // tf_ms), x2_ms, ln.at(x2_ms // tf_ms)))
+        for ts, ln in ((h_ts, self.upper_line), (l_ts, self.lower_line)):
+            if ts is None:
+                continue
+            segs.append((ts, ln.at(ts // tf_ms), x2_ms, ln.at(x2_ms // tf_ms)))
         return segs
 
     def to_dict(self) -> dict:
@@ -292,6 +342,18 @@ def _maybe_notify(inst: Instance, now_s: int, cfg) -> List[Action]:
     return [Action("compression_notify", inst, {"state": inst.state, "level": inst.level})]
 
 
+def _line_break_death(inst, line_side: str, c) -> List[Action]:
+    """A triangle's boundary line was broken by a close (without a level
+    break): the pattern is over — from this bar on it is a range doing
+    EH/EL (user rule 2026-09-16). Silent terminal invalidation."""
+    inst.state = STATE_INVALIDATED
+    inst.add_event("line_break", int(c.ts // 1000), side=line_side, close=c.close)
+    return [Action("invalidate", inst, {
+        "reason": "line_break", "side": line_side, "close": c.close,
+        "candle_ts": c.ts,
+    })]
+
+
 def evaluate_closed_candles(
     inst: Instance,
     candles: Sequence[Candle],
@@ -314,40 +376,42 @@ def evaluate_closed_candles(
     late_cutoff = new[-1].ts - 2 * tf_ms
 
     buffer = cfg.breakout_buffer_atr * inst.atr
-    # Breakout levels are PIVOT PRICES, not extrapolated boundary values
-    # (user rule 2026-09-16): up = newest confirmed high-side pivot (e.g.
-    # the last EH / LH / HH); down = newest confirmed low-side pivot.
-    up_level = inst.last_high_price()
-    lo_level = inst.last_low_price()
 
     for c in new:
-        beyond_up = up_level is not None and c.close > up_level + buffer
-        beyond_dn = lo_level is not None and c.close < lo_level - buffer
+        bar = c.ts // tf_ms
+        # Per-family close classification (user rules 2026-09-16):
+        # box/triangles → alert levels are the last pivot in that direction;
+        # wedges → the boundary line is the level; for triangles a close
+        # through a boundary LINE (without the level break) means the
+        # pattern is over — from that bar it is a range doing EH/EL.
+        beyond_up, beyond_dn, line_side = classify_close(inst, c.close, bar, buffer)
         late = c.ts < late_cutoff
 
         if inst.probe_msg_id is not None and inst.probe_candle_ms == c.ts:
             # verdict for the posted heads-up
             if inst.probe_side == "up" and beyond_up:
                 actions.append(Action("breakout_keep", inst, {
-                    "side": "up", "level": up_level, "close": c.close,
+                    "side": "up", "level": alert_level_for(inst, "up", bar),
+                    "close": c.close,
                     "candle_ts": c.ts, "late": late, "msg_id": inst.probe_msg_id,
                 }))
                 inst.state = STATE_BREAKOUT
                 inst.notified["breakout"] = True
                 inst.add_event("breakout", int(c.ts // 1000), side="up", close=c.close,
-                               level=up_level, kept=True)
+                               level=alert_level_for(inst, "up", bar), kept=True)
                 inst.probe_msg_id = None
                 inst.last_eval_ts = new[-1].ts
                 return actions
             if inst.probe_side == "down" and beyond_dn:
                 actions.append(Action("breakout_keep", inst, {
-                    "side": "down", "level": lo_level, "close": c.close,
+                    "side": "down", "level": alert_level_for(inst, "down", bar),
+                    "close": c.close,
                     "candle_ts": c.ts, "late": late, "msg_id": inst.probe_msg_id,
                 }))
                 inst.state = STATE_BREAKOUT
                 inst.notified["breakout"] = True
                 inst.add_event("breakout", int(c.ts // 1000), side="down", close=c.close,
-                               level=lo_level, kept=True)
+                               level=alert_level_for(inst, "down", bar), kept=True)
                 inst.probe_msg_id = None
                 inst.last_eval_ts = new[-1].ts
                 return actions
@@ -363,7 +427,7 @@ def evaluate_closed_candles(
             # opposite-direction close = a genuine breakout the other way
             if beyond_up or beyond_dn:
                 side = "up" if beyond_up else "down"
-                level = up_level if beyond_up else lo_level
+                level = alert_level_for(inst, side, bar)
                 actions.append(Action("breakout_post", inst, {
                     "side": side, "level": level, "close": c.close,
                     "candle_ts": c.ts, "late": late,
@@ -374,12 +438,16 @@ def evaluate_closed_candles(
                                level=level, kept=False)
                 inst.last_eval_ts = new[-1].ts
                 return actions
+            if line_side:
+                actions.extend(_line_break_death(inst, line_side, c))
+                inst.last_eval_ts = new[-1].ts
+                return actions
             continue
 
         # no pending probe for this candle
         if beyond_up or beyond_dn:
             side = "up" if beyond_up else "down"
-            level = up_level if beyond_up else lo_level
+            level = alert_level_for(inst, side, bar)
             actions.append(Action("breakout_post", inst, {
                 "side": side, "level": level, "close": c.close,
                 "candle_ts": c.ts, "late": late,
@@ -388,6 +456,10 @@ def evaluate_closed_candles(
             inst.notified["breakout"] = True
             inst.add_event("breakout", int(c.ts // 1000), side=side, close=c.close,
                            level=level, kept=False)
+            inst.last_eval_ts = new[-1].ts
+            return actions
+        if line_side:
+            actions.extend(_line_break_death(inst, line_side, c))
             inst.last_eval_ts = new[-1].ts
             return actions
 
@@ -404,6 +476,24 @@ def evaluate_closed_candles(
 
     inst.last_eval_ts = new[-1].ts
     return actions
+
+
+def _post_pivot_line_death(inst, closed_candles, tf_ms: int, buffer: float) -> str:
+    """Scan fresh post-last-pivot closes for a triangle LINE breach that is
+    not a pivot-level break (user rule 2026-09-16): if the line was broken
+    without the level, the pattern is already dead — it is a range from
+    that close. Stateless (catches crosses missed across restarts or those
+    between pivots); returns the death side or ""."""
+    if inst.type not in _TRIANGLE_TYPES:
+        return ""
+    last_ts = max((p["ts"] for p in inst.pivots), default=0)
+    for c in closed_candles:
+        if c.ts <= last_ts:
+            continue
+        _, _, line_side = classify_close(inst, c.close, c.ts // tf_ms, buffer)
+        if line_side:
+            return line_side
+    return ""
 
 
 def update_for_scan(
@@ -428,6 +518,24 @@ def update_for_scan(
     # 1) candle-close verdicts + breakout checks (boundary = pre-update)
     for inst in symbol_tf:
         if inst.state in TERMINAL_STATES:
+            continue
+        # triangle line-death backfill (user rule 2026-09-16): a post-pivot
+        # close through a boundary LINE (without the level) = pattern over
+        dead_side = _post_pivot_line_death(
+            inst, closed_candles, tf_ms, cfg.breakout_buffer_atr * inst.atr)
+        if dead_side:
+            if inst.probe_msg_id is not None:
+                actions.append(Action("retract", inst, {
+                    "msg_id": inst.probe_msg_id,
+                    "reason": "line broken — pattern no longer holds",
+                }))
+                inst.probe_msg_id = None
+                inst.probe_candle_ms = 0
+                inst.probe_side = ""
+            inst.state = STATE_INVALIDATED
+            inst.add_event("line_break", now_s, side=dead_side)
+            actions.append(Action("invalidate", inst, {
+                "reason": "line_break", "side": dead_side}))
             continue
         actions.extend(evaluate_closed_candles(inst, closed_candles, tf_ms, now_s, cfg))
 
@@ -500,25 +608,37 @@ def update_for_scan(
 
 
 def _already_broken_side(cand: Candidate, closed_candles, tf_ms: int, cfg) -> Optional[str]:
-    """Which PIVOT LEVEL the price already breached after the window's last
-    pivot — None when all post-pivot closes sit inside.
+    """Which level the price already breached after the window's last pivot
+    — None when all post-pivot closes sit inside.
 
-    Parity with live breakout detection (same pivot-price levels): if a
-    candle would have been an alert while watching, the structure is not
-    createable."""
+    Per-family parity with live detection (user rules 2026-09-16): wedges vs
+    the boundary LINES; triangles vs the last-pivot levels OR the lines (a
+    triangle whose line is already crossed is a dead pattern — it is a range
+    from that bar); box vs the last-pivot levels."""
     if not closed_candles:
         return None
-    up_level = next((r.price for r in reversed(cand.refs) if r.is_high), None)
-    lo_level = next((r.price for r in reversed(cand.refs) if not r.is_high), None)
+    is_wedge = cand.type in _WEDGE_TYPES
+    is_tri = cand.type in _TRIANGLE_TYPES
+    up_level = None if (is_wedge or is_tri) else \
+        next((r.price for r in reversed(cand.refs) if r.is_high), None)
+    lo_level = None if (is_wedge or is_tri) else \
+        next((r.price for r in reversed(cand.refs) if not r.is_high), None)
     last_ts = cand.refs[-1].ts
     buffer = cfg.breakout_buffer_atr * cand.atr
     for c in closed_candles:
         if c.ts <= last_ts:
             continue
-        if up_level is not None and c.close > up_level + buffer:
-            return "up"
-        if lo_level is not None and c.close < lo_level - buffer:
-            return "down"
+        ab = c.ts // tf_ms
+        if is_wedge or is_tri:
+            if c.close > cand.upper.at(ab) + buffer:
+                return "up"
+            if c.close < cand.lower.at(ab) - buffer:
+                return "down"
+        if not is_wedge:
+            if up_level is not None and c.close > up_level + buffer:
+                return "up"
+            if lo_level is not None and c.close < lo_level - buffer:
+                return "down"
     return None
 
 

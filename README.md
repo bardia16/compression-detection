@@ -25,12 +25,24 @@ compression + breakout alerts to the **Breakouts** Telegram channel
   STAYS (breakout record); failed close → message DELETED, structure
   stays active. Breakout = candle **close** beyond the level; wicks never
   count. Structure confirmation uses **closed candles only**.
-- **Breakout level (user rule 2026-09-16):** the price level shown and
-  checked is the **last confirmed pivot in that direction** — e.g. the
-  last EH for a range's long side, the last LH for a descending
-  triangle's up-break, the last EL/HL for shorts. NOT the boundary line
-  extrapolated to the break bar. Fitted boundary lines remain for
-  geometry (slopes/convergence) and chart range display only.
+- **Breakout level (user rules 2026-09-16):** the price level shown and
+  checked is the **last confirmed pivot in that direction** for **box and
+  triangles** (e.g. the last EH for a box's long side, the last LH for a
+  descending triangle's up-break). For **wedges the boundary LINE is the
+  level** (close beyond the line = the breakout; level shown = line value
+  at that bar). Fitted boundary lines remain for geometry
+  (slopes/convergence) and chart drawing.
+- **Triangle line-death (user rules 2026-09-16):** if a close goes through
+  a triangle's boundary **line** WITHOUT breaking the pivot level, the
+  pattern no longer holds — from that close it is a **range doing EH/EL**,
+  silently invalidated (pending probe retracted). Never confused with a
+  breakout (level breaks are classified first). A triangle whose line is
+  already broken at detection time is never created.
+- **Charts (user rules 2026-09-16):** **triangles/wedges** draw the two
+  extrapolated boundary lines, each starting at its own first pivot (no
+  left overhang); **boxes** draw plain horizontals at their last pivot
+  levels (same values as their breakout levels). No extrapolation for
+  ranges. Equality of EH/EL stays ATR-based (the label logic).
 - **Boundary-hit requirement (spec 2026-09-16):** a structure cannot
   reach CONFIRMED (or beyond) until at least one of its boundaries has
   **≥2 distinct confirmed pivot hits** (`min_boundary_hits` in config).

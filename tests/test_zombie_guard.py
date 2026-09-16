@@ -7,7 +7,9 @@ candle).
 from types import SimpleNamespace
 
 from compression_detection import structure as st
-from compression_detection.detector import TYPE_BOX, Candidate, PivotRef
+from compression_detection.detector import (
+    TYPE_BOX, TYPE_DESC_TRI, Candidate, PivotRef,
+)
 from compression_detection.lifecycle import (
     STATE_DETECTED, update_for_scan,
 )
@@ -15,7 +17,7 @@ from compression_detection.models import Candle
 
 TF_MS = 60_000
 CFG = SimpleNamespace(
-    min_pivots={TYPE_BOX: 4},
+    min_pivots={TYPE_BOX: 4, TYPE_DESC_TRI: 4},
     confirm_extra_pivots=1,
     established_extra_pivots=2,
     catchup_max_candles=8,
@@ -36,6 +38,18 @@ BOX = Candidate(
     upper=st.Line(slope=0.0, intercept=100.0, base_bar=0.0),
     lower=st.Line(slope=0.0, intercept=90.0, base_bar=0.0),
     atr=2.0, upper_class=st.FLAT, lower_class=st.FLAT,
+    metrics={"fit_err_atr": 0.0},
+)
+
+# descending triangle with a strongly falling upper line: at bar 24 the line
+# sits at 93 — far below the last LH level (96) — the BOME class
+DESC = Candidate(
+    type=TYPE_DESC_TRI,
+    refs=[ref(10, 100.0, "H"), ref(14, 90.0, "L"),
+          ref(18, 96.0, "H", "LH"), ref(22, 90.2, "L", "EL")],
+    upper=st.Line(slope=-0.5, intercept=105.0, base_bar=0.0),
+    lower=st.Line(slope=0.0, intercept=90.0, base_bar=0.0),
+    atr=2.0, upper_class=st.FALLING, lower_class=st.FLAT,
     metrics={"fit_err_atr": 0.0},
 )
 
@@ -92,6 +106,70 @@ def test_no_candles_after_last_pivot_creates():
     instances = {}
     actions = update_for_scan(instances, "AAA", "15m", [BOX], [], TF_MS, 1000, CFG)
     assert len(instances) == 1
+
+
+def test_triangle_line_already_broken_skips_creation():
+    """BOME class (user rule 2026-09-16): post-pivot closes through the
+    fitted LINE (without touching the pivot levels) mean the triangle is
+    already dead — a range from that bar; do not create it."""
+    instances = {}
+    # close 95: beyond the upper line (93 at bar 24) but below the LH level (96)
+    actions = update_for_scan(instances, "AAA", "15m", [DESC], [candle(24, 95.0)],
+                              TF_MS, 1000, CFG)
+    assert len(instances) == 0
+    skips = [a for a in actions if a.kind == "skip_create"]
+    assert len(skips) == 1
+    assert skips[0].detail["side"] == "up"
+
+
+def test_triangle_inside_creates():
+    instances = {}
+    update_for_scan(instances, "AAA", "15m", [DESC], [candle(24, 92.0)],
+                    TF_MS, 1000, CFG)
+    assert len(instances) == 1
+
+
+def test_stale_triangle_line_break_dies_on_next_scan():
+    """BOME class at instance level (user rule 2026-09-16): a live triangle
+    whose post-pivot closes already crossed the line (no level touch) is
+    dead on the next scan — retract any pending probe + invalidate."""
+    refs = [ref(10, 100.0, "H"), ref(14, 90.0, "L"),
+            ref(18, 96.0, "H", "LH"), ref(22, 90.2, "L", "EL")]
+    cand = Candidate(
+        type=TYPE_DESC_TRI, refs=refs,
+        upper=st.Line(slope=-0.5, intercept=105.0, base_bar=0.0),
+        lower=st.Line(slope=0.0, intercept=90.0, base_bar=0.0),
+        atr=2.0, upper_class=st.FALLING, lower_class=st.FLAT,
+        metrics={"fit_err_atr": 0.0},
+    )
+    instances = {}
+    update_for_scan(instances, "AAA", "15m", [cand], [], TF_MS, 1000, CFG)
+    inst = list(instances.values())[0]
+    inst.probe_msg_id = 555
+
+    actions = update_for_scan(instances, "AAA", "15m", [cand],
+                              [candle(24, 95.0)], TF_MS, 1060, CFG)
+    assert [a.kind for a in actions] == ["retract", "invalidate"]
+    assert actions[1].detail["reason"] == "line_break"
+
+
+def test_stale_triangle_inside_stays_alive():
+    refs = [ref(10, 100.0, "H"), ref(14, 90.0, "L"),
+            ref(18, 96.0, "H", "LH"), ref(22, 90.2, "L", "EL")]
+    cand = Candidate(
+        type=TYPE_DESC_TRI, refs=refs,
+        upper=st.Line(slope=-0.5, intercept=105.0, base_bar=0.0),
+        lower=st.Line(slope=0.0, intercept=90.0, base_bar=0.0),
+        atr=2.0, upper_class=st.FALLING, lower_class=st.FLAT,
+        metrics={"fit_err_atr": 0.0},
+    )
+    instances = {}
+    update_for_scan(instances, "AAA", "15m", [cand], [], TF_MS, 1000, CFG)
+    inst = list(instances.values())[0]
+    actions = update_for_scan(instances, "AAA", "15m", [cand],
+                              [candle(24, 91.0)], TF_MS, 1060, CFG)
+    assert [a.kind for a in actions] == []
+    assert inst.state not in ("invalidated",)
 
 
 def test_agent_skip_emitted_once_per_type():

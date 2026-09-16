@@ -332,30 +332,60 @@ def test_breakout_level_is_last_pivot_price():
     assert actions2[0].detail["level"] == 90.5        # last EL
 
 
-def test_level_not_extrapolated_boundary_line():
-    """Descending upper boundary: the line keeps falling below the last LH
-    pivot — the pivot price is the level, not the line at the break bar."""
+def test_triangle_line_break_kills_pattern_before_level():
+    """Descending upper boundary: a close between the falling LINE and the
+    last LH level is NOT a breakout (level = pivot price, user rule) — it
+    kills the triangle: line broken → from that bar it is a range, and the
+    pattern doesn't hold anymore (user rule 2026-09-16)."""
     refs = [ref(10, 100.0, "H"), ref(14, 90.0, "L"),
             ref(18, 96.0, "H", "LH"), ref(22, 90.2, "L", "EL")]
     cand = mk_cand(TYPE_DESC_TRI, refs, up=(-0.5, 105.0), lo=(0.0, 90.0))
-    # line at bar 31 = 105 - 0.5*31 = 89.5 -> a line-based check would fire at 95
+    # line at bar 31 = 105 - 0.5*31 = 89.5; last LH level = 96.0
     inst = mk_instance(cand)
-    assert evaluate_closed_candles(inst, [candle(31, 95.0)], TF_MS, 1000, CFG) == []
-    assert inst.state != STATE_BREAKOUT
+    actions = evaluate_closed_candles(inst, [candle(31, 95.0)], TF_MS, 1000, CFG)
+    assert [a.kind for a in actions] == ["invalidate"]
+    assert actions[0].detail["reason"] == "line_break"
+    assert actions[0].detail["side"] == "up"
+    assert inst.state == STATE_INVALIDATED
 
-    inst2 = mk_instance(cand)
-    actions = evaluate_closed_candles(inst2, [candle(31, 97.0)], TF_MS, 1000, CFG)
+    # a close above BOTH the level (96) and the line = the breakout, level 96
+    inst2 = mk_instance(mk_cand(TYPE_DESC_TRI, refs, up=(-0.5, 105.0),
+                                lo=(0.0, 90.0)))
+    actions2 = evaluate_closed_candles(inst2, [candle(31, 97.0)], TF_MS, 1000, CFG)
+    assert [a.kind for a in actions2] == ["breakout_post"]
+    assert actions2[0].detail["level"] == 96.0        # last LH pivot price
+
+
+def test_wedge_breakout_level_is_the_line():
+    """Wedge (user rule): the boundary LINE is the breakout level — the
+    displayed level is the line's value at the break bar, not a pivot."""
+    refs = [ref(10, 100.0, "H"), ref(14, 90.0, "L"), ref(18, 96.0, "H", "LH"),
+            ref(26, 86.0, "L", "LL"), ref(30, 88.0, "H", "LH")]
+    cand = mk_cand(TYPE_FALLING_WEDGE, refs, up=(-0.3, 100.0), lo=(-0.2, 92.0))
+    inst = mk_instance(cand)
+    actions = evaluate_closed_candles(inst, [candle(34, 90.0)], TF_MS, 1000, CFG)
     assert [a.kind for a in actions] == ["breakout_post"]
-    assert actions[0].detail["level"] == 96.0         # last LH pivot price
+    assert actions[0].detail["side"] == "up"
+    assert actions[0].detail["level"] == pytest.approx(89.8)  # upper line at 34
 
 
 def test_probe_level_is_last_pivot_price():
     refs, cand = box_refs(n=4)
     inst = mk_instance(cand)
-    assert inst.beyond_side(100.4, 0.0) is None       # between line (100) and EH (100.5)
-    assert inst.beyond_side(100.6, 0.0) == "up"
-    assert inst.beyond_side(90.6, 0.0) is None        # between EL (90.5) and line (90)
-    assert inst.beyond_side(90.3, 0.0) == "down"
+    assert inst.beyond_side(100.4, 0.0, 24) is None   # between line (100) and EH (100.5)
+    assert inst.beyond_side(100.6, 0.0, 24) == "up"
+    assert inst.beyond_side(90.6, 0.0, 24) is None    # between EL (90.5) and line (90)
+    assert inst.beyond_side(90.3, 0.0, 24) == "down"
+
+
+def test_probe_level_wedge_uses_line():
+    refs = [ref(10, 100.0, "H"), ref(14, 90.0, "L"), ref(18, 96.0, "H", "LH"),
+            ref(26, 86.0, "L", "LL"), ref(30, 88.0, "H", "LH")]
+    cand = mk_cand(TYPE_FALLING_WEDGE, refs, up=(-0.3, 100.0), lo=(-0.2, 92.0))
+    inst = mk_instance(cand)
+    # upper line at bar 34 = 100 - 0.3*34 = 89.8
+    assert inst.beyond_side(89.9, 0.0, 34) == "up"
+    assert inst.beyond_side(89.5, 0.0, 34) is None
 
 
 # ── boundary-hit requirement (2026-09-16) ──────────────────────────────
@@ -379,19 +409,20 @@ def test_hit_requirement_exposed_on_instance():
     assert inst.state == STATE_COMPRESSING            # 6 pivots + gate satisfied
 
 
-def test_trend_segments_extrapolate_boundary_lines():
-    """Chart segments = fitted boundary lines extruded from the first pivot
-    to the right edge (sloped for triangles, flat for boxes)."""
+def test_trend_segments_start_at_each_sides_first_pivot():
+    """Chart segments start at each boundary's OWN first pivot (no left
+    overhang, user rule 2026-09-16): upper from the first high, lower from
+    the first low."""
     refs = [ref(10, 100.0, "H"), ref(14, 90.0, "L"),
             ref(18, 96.0, "H", "LH"), ref(22, 90.2, "L", "EL")]
     cand = mk_cand(TYPE_DESC_TRI, refs, up=(-0.5, 105.0), lo=(0.0, 90.0))
     inst = mk_instance(cand)
     segs = inst.trend_segments(TF_MS, 31 * TF_MS)
     assert len(segs) == 2
-    # upper: at bar 10 -> 100.0, at bar 31 -> 89.5 (falling line)
+    # upper (first high at bar 10): 105 - 0.5*10 = 100.0 -> 89.5 at bar 31
     assert segs[0] == (10 * TF_MS, 100.0, 31 * TF_MS, 89.5)
-    # lower: flat 90.0
-    assert segs[1] == (10 * TF_MS, 90.0, 31 * TF_MS, 90.0)
+    # lower (first low at bar 14): flat 90.0, starts at bar 14
+    assert segs[1] == (14 * TF_MS, 90.0, 31 * TF_MS, 90.0)
 
 
 # ── creation guards ────────────────────────────────────────────────────

@@ -83,17 +83,26 @@ def label_pivot(
     pivot: Pivot,
     prev_same_type: Optional[Pivot],
     atr14: float,
+    atr14_prev: Optional[float] = None,
 ) -> Optional[PivotLabel]:
     """Label a confirmed pivot against the previous same-type pivot.
+
+    The significance threshold uses the volatility ACROSS the two pivots —
+    max of their ATR14 readings (user rule 2026-09-16, LTC case): during a
+    compression volatility cools, and the same price spread must not flip a
+    genuine EL/EH into HL/HH just because the tail ATR shrank.
 
     Returns None if there's no previous same-type pivot (can't label yet)
     or atr14 is not available.
     """
     if prev_same_type is None or atr14 is None or atr14 <= 0:
         return None
+    thr = atr14
+    if atr14_prev is not None and atr14_prev > 0:
+        thr = max(atr14, atr14_prev)
     if pivot.is_high:
-        return label_high(pivot.price, prev_same_type.price, atr14)
-    return label_low(pivot.price, prev_same_type.price, atr14)
+        return label_high(pivot.price, prev_same_type.price, thr)
+    return label_low(pivot.price, prev_same_type.price, thr)
 
 
 def label_pivots(
@@ -114,7 +123,10 @@ def label_pivots(
     for p in pivots:
         atr14 = atr14_series[p.bar_index] if p.bar_index < len(atr14_series) else None
         prev = last_high if p.is_high else last_low
-        label = label_pivot(p, prev, atr14) if atr14 is not None else None
+        atr_prev = None
+        if prev is not None and prev.bar_index < len(atr14_series):
+            atr_prev = atr14_series[prev.bar_index]
+        label = label_pivot(p, prev, atr14, atr_prev) if atr14 is not None else None
         # the pivot becomes the new same-type anchor even when it can't be
         # labeled — otherwise the first pivot would poison the whole chain
         if p.is_high:
@@ -144,7 +156,10 @@ def label_all_pivots(
     for p in pivots:
         atr14 = atr14_series[p.bar_index] if p.bar_index < len(atr14_series) else None
         prev = last_high if p.is_high else last_low
-        label = label_pivot(p, prev, atr14) if atr14 is not None else None
+        atr_prev = None
+        if prev is not None and prev.bar_index < len(atr14_series):
+            atr_prev = atr14_series[prev.bar_index]
+        label = label_pivot(p, prev, atr14, atr_prev) if atr14 is not None else None
         if p.is_high:
             last_high = p
         else:

@@ -221,17 +221,23 @@ class Instance:
 
     def trend_segments(self, tf_ms: int, x2_ms: int) -> list:
         """Boundary lines for the chart (triangles/wedges): each fitted line
-        drawn from its OWN first pivot to the right edge — no left overhang
-        (user rule 2026-09-16)."""
+        drawn from its OWN first pivot to the right edge; the FLAT side of a
+        pattern (desc-triangle base / asc-triangle top) is drawn as a
+        strictly HORIZONTAL line at the last pivot of that side
+        (user rule 2026-09-16, LTC case — no sloped bases)."""
         if not self.pivots:
             return []
-        h_ts = next((p["ts"] for p in self.pivots if p["side"] == "H"), None)
-        l_ts = next((p["ts"] for p in self.pivots if p["side"] == "L"), None)
         segs = []
-        for ts, ln in ((h_ts, self.upper_line), (l_ts, self.lower_line)):
+        for side, ln, cls in (("H", self.upper_line, self.upper_class),
+                              ("L", self.lower_line, self.lower_class)):
+            ts = next((p["ts"] for p in self.pivots if p["side"] == side), None)
             if ts is None:
                 continue
-            segs.append((ts, ln.at(ts // tf_ms), x2_ms, ln.at(x2_ms // tf_ms)))
+            if cls == st.FLAT:
+                lv = self.last_high_price() if side == "H" else self.last_low_price()
+                segs.append((ts, lv, x2_ms, lv))
+            else:
+                segs.append((ts, ln.at(ts // tf_ms), x2_ms, ln.at(x2_ms // tf_ms)))
         return segs
 
     def to_dict(self) -> dict:

@@ -243,12 +243,23 @@ def _check_window(
     if any(upper.at(b) <= lower.at(b) for b in bars):
         return None
 
-    # Slope classes, measured over each side's own pivot span
+    # Slope classes, measured over each side's own pivot span. The class
+    # threshold uses the volatility ACROSS that span (max of the endpoint
+    # ATR14 readings) — a compression whose volatility cools must not have
+    # its flat boundary re-classified as rising/falling by the shrunken
+    # tail ATR (user rule 2026-09-16, LTC case).
+    def _span_atr(side_pivots):
+        vals = []
+        for p in (side_pivots[0], side_pivots[-1]):
+            if p.bar_index < len(atr14_series) and atr14_series[p.bar_index]:
+                vals.append(atr14_series[p.bar_index])
+        return max(vals) if vals else atr
+
     upper_class = st.slope_class(
-        upper, highs[0].abs_bar, highs[-1].abs_bar, atr, cfg.flat_tol_atr
+        upper, highs[0].abs_bar, highs[-1].abs_bar, _span_atr(highs), cfg.flat_tol_atr
     )
     lower_class = st.slope_class(
-        lower, lows[0].abs_bar, lows[-1].abs_bar, atr, cfg.flat_tol_atr
+        lower, lows[0].abs_bar, lows[-1].abs_bar, _span_atr(lows), cfg.flat_tol_atr
     )
     if upper_class not in spec.upper_slopes or lower_class not in spec.lower_slopes:
         return None

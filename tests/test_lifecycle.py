@@ -38,7 +38,8 @@ def ref(bar, price, side, label=None):
                     price=price, is_high=(side == "H"), label=label)
 
 
-def mk_cand(type_name, refs, up=(0.0, 100.0), lo=(0.0, 90.0), atr=2.0):
+def mk_cand(type_name, refs, up=(0.0, 100.0), lo=(0.0, 90.0), atr=2.0,
+            up_cls=st.FLAT, lo_cls=st.FLAT):
     spec = TYPE_SPECS[type_name]
     upper_hit_set = {l.value for l in spec.upper_labels}
     lower_hit_set = {l.value for l in spec.lower_labels}
@@ -50,7 +51,7 @@ def mk_cand(type_name, refs, up=(0.0, 100.0), lo=(0.0, 90.0), atr=2.0):
         type=type_name, refs=refs,
         upper=st.Line(slope=up[0], intercept=up[1], base_bar=0.0),
         lower=st.Line(slope=lo[0], intercept=lo[1], base_bar=0.0),
-        atr=atr, upper_class=st.FLAT, lower_class=st.FLAT, metrics=meta,
+        atr=atr, upper_class=up_cls, lower_class=lo_cls, metrics=meta,
     )
 
 
@@ -410,19 +411,22 @@ def test_hit_requirement_exposed_on_instance():
 
 
 def test_trend_segments_start_at_each_sides_first_pivot():
-    """Chart segments start at each boundary's OWN first pivot (no left
-    overhang, user rule 2026-09-16): upper from the first high, lower from
-    the first low."""
+    """Chart segments: each boundary drawn from its OWN first pivot (no left
+    overhang); the FLAT side of a descending triangle is a strictly
+    HORIZONTAL line at the last low pivot — no sloped bases (user rule
+    2026-09-16, LTC case)."""
     refs = [ref(10, 100.0, "H"), ref(14, 90.0, "L"),
             ref(18, 96.0, "H", "LH"), ref(22, 90.2, "L", "EL")]
-    cand = mk_cand(TYPE_DESC_TRI, refs, up=(-0.5, 105.0), lo=(0.0, 90.0))
+    cand = mk_cand(TYPE_DESC_TRI, refs, up=(-0.5, 105.0), lo=(0.0, 90.0),
+                   up_cls=st.FALLING, lo_cls=st.FLAT)
     inst = mk_instance(cand)
     segs = inst.trend_segments(TF_MS, 31 * TF_MS)
     assert len(segs) == 2
-    # upper (first high at bar 10): 105 - 0.5*10 = 100.0 -> 89.5 at bar 31
+    # upper (falling, first high at bar 10): 105 - 0.5*10 = 100.0 -> 89.5
     assert segs[0] == (10 * TF_MS, 100.0, 31 * TF_MS, 89.5)
-    # lower (first low at bar 14): flat 90.0, starts at bar 14
-    assert segs[1] == (14 * TF_MS, 90.0, 31 * TF_MS, 90.0)
+    # lower (FLAT): horizontal at the LAST low pivot (90.2), from bar 14
+    assert segs[1] == (14 * TF_MS, 90.2, 31 * TF_MS, 90.2)
+    assert segs[1][1] == segs[1][3]                     # strictly horizontal
 
 
 # ── creation guards ────────────────────────────────────────────────────

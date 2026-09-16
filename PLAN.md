@@ -156,6 +156,8 @@ Mapping: state = DETECTED if level detected; CONFIRMED if level confirmed (or es
 
 **Key correctness rules**
 - Only CONFIRMED pivots drive structure (never `zigzag.provisional`).
+- **Zombie guard (2026-09-16):** a candidate whose post-last-pivot closes already breach a boundary is never created — `skip_create` event (parity with the live breakout predicate: if a candle would have been an alert while watching, the structure is not createable).
+- **Consumed pivots (PENDLE class):** a terminal instance of the same type sharing ≥2 pivots blocks re-creation of its own sub-windows/post-pullback clones — broken once = watched once.
 - Wick vs close: pivots are close-based by construction; breakout = candle CLOSE beyond boundary; wick-only never breaks (test pinned).
 - Recompute-from-scratch each scan (deterministic; no incremental drift) + idempotency: same candles scanned twice → zero new events (test pinned).
 - A structure is never locked: every new pivot reruns matching; classification can dissolve (→ INVALIDATED) as spec §18/§29.

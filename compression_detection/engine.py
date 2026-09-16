@@ -188,7 +188,9 @@ class Engine:
                 raw_actions = best_per_coin_tf(raw_actions)
 
             sends = await self._dispatch(raw_actions, ses)
-            actions = [{"kind": a.kind, "id": a.instance.id, "detail": a.detail}
+            actions = [{"kind": a.kind,
+                        "id": a.instance.id if a.instance else None,
+                        "detail": a.detail}
                        for a in raw_actions]
 
         summary = build_summary(now_ms, self.dry_run, len(pairs), errors,
@@ -208,6 +210,9 @@ class Engine:
     async def _dispatch(self, raw_actions: List, ses) -> List[dict]:
         sends: List[dict] = []
         for a in raw_actions:
+            if a.kind == "skip_create":
+                self.audit.write({"event": "skip_create", **a.detail})
+                continue
             inst = a.instance
             kind = a.kind
             if kind == "compression_notify":

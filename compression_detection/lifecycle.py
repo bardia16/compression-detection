@@ -70,11 +70,15 @@ def state_for_level(level: str) -> str:
 
 @dataclass
 class Action:
-    """Something the engine must do as a result of a lifecycle decision."""
+    """Something the engine must do as a result of a lifecycle decision.
 
-    kind: str  # compression_notify | breakout_keep | breakout_post |
-    #            retract | invalidate | upgrade
-    instance: "Instance"
+    kind: compression_notify | breakout_keep | breakout_post |
+          retract | invalidate | upgrade | skip_create
+    instance is None only for skip_create (no instance exists by design).
+    """
+
+    kind: str
+    instance: Optional["Instance"]
     detail: dict = field(default_factory=dict)
 
 
@@ -394,7 +398,8 @@ def update_for_scan(
         actions.extend(_apply_candidate(inst, cand, now_s, cfg))
         actions.extend(_maybe_notify(inst, now_s, cfg))
 
-    # 3) new instances from unmatched candidates
+    # 3) new instances from unmatched candidates (with already-broken guard)
+    skipped_types: set = set()
     for cand in candidates:
         if id(cand) in consumed:
             continue
@@ -408,6 +413,32 @@ def update_for_scan(
         key = instance_id(symbol, tf, cand.type, cand.first_ts)
         if key in instances:
             continue
+        # consumed pivots (PENDLE class): a terminal instance of the same
+        # type sharing >=2 pivots = the same structure episode — a broken /
+        # invalidated structure is watched ONCE; never re-created from its
+        # own sub-windows or after a pullback. A genuinely new structure
+        # forms with new pivots and passes this guard.
+        if any(i.type == cand.type and i.state in TERMINAL_STATES
+               and len(cand.pivot_tss & i.pivot_tss) >= 2
+               for i in instances.values()
+               if i.symbol == symbol and i.tf == tf):
+            continue
+
+        # already-broken guard (2026-09-16): a candidate whose post-last-pivot
+        # closes already breach a boundary is a zombie detection — price left
+        # the structure before it could ever be watched. Never create it;
+        # record the skip once per type for the audit/report.
+        beyond = _already_broken_side(cand, closed_candles, tf_ms, cfg)
+        if beyond is not None:
+            if cand.type not in skipped_types:
+                skipped_types.add(cand.type)
+                actions.append(Action("skip_create", None, {
+                    "symbol": symbol, "tf": tf, "type": cand.type,
+                    "reason": "already_broken", "side": beyond,
+                    "first_ts": cand.first_ts, "pivot_count": cand.pivot_count,
+                }))
+            continue
+
         inst = create_instance(cand, symbol, tf, now_s, cfg)
         # a fresh instance watches candles strictly AFTER its creation scan
         if closed_candles:
@@ -418,6 +449,28 @@ def update_for_scan(
         actions.extend(_maybe_notify(inst, now_s, cfg))
 
     return actions
+
+
+def _already_broken_side(cand: Candidate, closed_candles, tf_ms: int, cfg) -> Optional[str]:
+    """Which boundary the price already breached after the window's last
+    pivot — None when all post-pivot closes sit inside the boundaries.
+
+    Uses the same predicate as live breakout detection (parity: if a candle
+    would have been an alert while watching, the structure is not createable).
+    """
+    if not closed_candles:
+        return None
+    last_ts = cand.refs[-1].ts
+    buffer = cfg.breakout_buffer_atr * cand.atr
+    for c in closed_candles:
+        if c.ts <= last_ts:
+            continue
+        ab = c.ts // tf_ms
+        if c.close > cand.upper.at(ab) + buffer:
+            return "up"
+        if c.close < cand.lower.at(ab) - buffer:
+            return "down"
+    return None
 
 
 def best_per_coin_tf(actions: List[Action]) -> List[Action]:
@@ -433,7 +486,11 @@ def best_per_coin_tf(actions: List[Action]) -> List[Action]:
         if a.kind != "compression_notify":
             passthrough.append(a)
             continue
-        k = (a.instance.symbol, a.instance.tf)
+        inst = a.instance
+        if inst is None:      # defensive; compression_notify always carries one
+            passthrough.append(a)
+            continue
+        k = (inst.symbol, inst.tf)
         cur = best.get(k)
         if cur is None or _notify_rank(a) < _notify_rank(cur):
             best[k] = a
@@ -444,4 +501,6 @@ def best_per_coin_tf(actions: List[Action]) -> List[Action]:
 
 def _notify_rank(a: Action):
     i = a.instance
+    if i is None:
+        return (0, 0.0)
     return (-i.pivot_count, i.metrics.get("fit_err_atr", 0.0))

@@ -64,7 +64,9 @@ audit/report). Flip + `pm2 restart` to go live.
    candle close? (scan_start → detect → probe_attempt/probe_post →
    retract/breakout_confirmed/post)
 2. `scan_reports/` — candidate metrics at that scan (fit error,
-   convergence, boundaries).
+   convergence, boundaries). `skip_create` = the structure resolved
+   before it could be watched (price already left after its last pivot) —
+   nothing alertable.
 3. `explain SYM TF` — reproduce the current read offline.
 4. Was a probe attempted for the right candle (`probe_attempt` id)? Was
    the live price beyond the boundary at T−3:00 (`probe_post` vs no

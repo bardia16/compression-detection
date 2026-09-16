@@ -57,3 +57,22 @@ def test_chart_url():
     u = chart_url("http://localhost:8002", "BTC/USDT", "4h", [64.12, 66.8])
     assert u == ("http://localhost:8002/chart/alert?symbol=BTCUSDT"
                  "&timeframe=4h&cross_lines=64.12,66.8")
+
+
+def test_chart_url_trend_lines():
+    """Sloped boundary segments ride along as trend_lines (user rule
+    2026-09-16: draw the real lines, extrapolated from the pivots)."""
+    segs = [(1788523200000, 0.00105789, 1789531200000, 0.00077562),
+            (1788523200000, 0.00082193, 1789531200000, 0.00083038)]
+    u = chart_url("http://localhost:8002", "BOMEUSDT", "4h", None, segs)
+    assert u == ("http://localhost:8002/chart/alert?symbol=BOMEUSDT"
+                 "&timeframe=4h&trend_lines="
+                 "1788523200000,0.00105789,1789531200000,0.00077562|"
+                 "1788523200000,0.00082193,1789531200000,0.00083038")
+
+
+def test_chart_url_lines_and_trend_lines():
+    u = chart_url("http://localhost:8002", "BOMEUSDT", "4h",
+                  [0.0008724], [(1788523200000, 0.001, 1789531200000, 0.0008)])
+    assert "&cross_lines=0.0008724" in u
+    assert "&trend_lines=1788523200000,0.001,1789531200000,0.0008" in u

@@ -77,7 +77,7 @@ def patch_env(monkeypatch, closes, last_price=None):
             return last_price
         monkeypatch.setattr(eng_mod, "fetch_last_price", fake_price)
 
-    async def no_chart(self, ses, inst, lines):
+    async def no_chart(self, ses, inst, lines, trend_lines=None):
         return None
     monkeypatch.setattr(eng_mod.Engine, "_chart", no_chart)
 

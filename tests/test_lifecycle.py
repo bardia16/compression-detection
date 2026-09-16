@@ -379,6 +379,21 @@ def test_hit_requirement_exposed_on_instance():
     assert inst.state == STATE_COMPRESSING            # 6 pivots + gate satisfied
 
 
+def test_trend_segments_extrapolate_boundary_lines():
+    """Chart segments = fitted boundary lines extruded from the first pivot
+    to the right edge (sloped for triangles, flat for boxes)."""
+    refs = [ref(10, 100.0, "H"), ref(14, 90.0, "L"),
+            ref(18, 96.0, "H", "LH"), ref(22, 90.2, "L", "EL")]
+    cand = mk_cand(TYPE_DESC_TRI, refs, up=(-0.5, 105.0), lo=(0.0, 90.0))
+    inst = mk_instance(cand)
+    segs = inst.trend_segments(TF_MS, 31 * TF_MS)
+    assert len(segs) == 2
+    # upper: at bar 10 -> 100.0, at bar 31 -> 89.5 (falling line)
+    assert segs[0] == (10 * TF_MS, 100.0, 31 * TF_MS, 89.5)
+    # lower: flat 90.0
+    assert segs[1] == (10 * TF_MS, 90.0, 31 * TF_MS, 90.0)
+
+
 # ── creation guards ────────────────────────────────────────────────────
 
 def test_anti_respawn_same_anchor():

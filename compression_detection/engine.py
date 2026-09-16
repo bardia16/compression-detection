@@ -241,8 +241,13 @@ class Engine:
                                       "id": inst.id, "action": "suppress"})
                     continue
                 caption = nt.fmt_compression(inst)
-                last = inst.pivots[-1]["bar"] if inst.pivots else 0
-                img = await self._chart(ses, inst, [inst.lower_at(last), inst.upper_at(last)])
+                # chart: the actual boundary lines extrapolated from the
+                # pivots (sloped triangles/wedges; ~flat boxes) — replaces
+                # the old horizontal boundary-at-last-bar values
+                x2 = (candles[-1].ts + TF_MS[inst.tf]) if candles \
+                    else inst.pivots[-1]["ts"]
+                segs = inst.trend_segments(TF_MS[inst.tf], x2)
+                img = await self._chart(ses, inst, [], segs)
                 mid = None
                 if img is not None:
                     mid = await self.tg.post_photo(caption, img)
@@ -269,7 +274,10 @@ class Engine:
                                       "action": "suppress"})
                     continue
                 caption = nt.fmt_breakout(inst, detail["side"], detail["level"])
-                img = await self._chart(ses, inst, [detail["level"]])
+                x2 = (candles[-1].ts + TF_MS[inst.tf]) if candles \
+                    else inst.pivots[-1]["ts"]
+                segs = inst.trend_segments(TF_MS[inst.tf], x2)
+                img = await self._chart(ses, inst, [detail["level"]], segs)
                 mid = None
                 if img is not None:
                     mid = await self.tg.post_photo(caption, img)
@@ -302,7 +310,8 @@ class Engine:
                 self.audit.write({"event": kind, "id": inst.id, **a.detail})
         return sends
 
-    async def _chart(self, ses, inst: Instance, lines: List[float]) -> Optional[bytes]:
+    async def _chart(self, ses, inst: Instance, lines: List[float],
+                     trend_lines: Optional[List[tuple]] = None) -> Optional[bytes]:
         if self.dry_run:
             return None
         async with self._chart_sem:
@@ -310,12 +319,12 @@ class Engine:
             if dt < CHART_SPACING_S:
                 await asyncio.sleep(CHART_SPACING_S - dt)
             img = await nt.fetch_chart(ses, self.cfg.chart_url, inst.symbol,
-                                       inst.tf, lines)
+                                       inst.tf, lines, trend_lines)
             if img is None:
                 # one retry before the text-only fallback
                 await asyncio.sleep(CHART_RETRY_DELAY_S)
                 img = await nt.fetch_chart(ses, self.cfg.chart_url, inst.symbol,
-                                           inst.tf, lines)
+                                           inst.tf, lines, trend_lines)
             self._chart_last = time.time()
             return img
 
@@ -360,7 +369,8 @@ class Engine:
             if level is None:      # defensive; side != None implies the level exists
                 continue
             caption = nt.fmt_breakout(inst, side, level)
-            img = await self._chart(ses, inst, [level])
+            segs = inst.trend_segments(tf_ms, open_ms)
+            img = await self._chart(ses, inst, [level], segs)
             mid = None
             if img is not None:
                 mid = await self.tg.post_photo(caption, img)

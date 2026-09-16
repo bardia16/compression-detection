@@ -171,6 +171,19 @@ class Instance:
             return "down"
         return None
 
+    def trend_segments(self, tf_ms: int, x2_ms: int) -> list:
+        """Boundary lines as (x1_ms, y1, x2_ms, y2) segments for the chart
+        (user rule 2026-09-16): the fitted boundary lines extrapolated from
+        the structure's first pivot to the chart's right edge — sloped for
+        triangles/wedges, ~flat for boxes."""
+        if not self.pivots:
+            return []
+        x1 = self.pivots[0]["ts"]
+        segs = []
+        for ln in (self.upper_line, self.lower_line):
+            segs.append((x1, ln.at(x1 // tf_ms), x2_ms, ln.at(x2_ms // tf_ms)))
+        return segs
+
     def to_dict(self) -> dict:
         return {
             "id": self.id, "symbol": self.symbol, "tf": self.tf, "type": self.type,

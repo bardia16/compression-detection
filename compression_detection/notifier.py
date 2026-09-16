@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 from typing import List, Optional
+from urllib.parse import quote
 
 import aiohttp
 
@@ -66,10 +67,23 @@ def fmt_breakout(inst, side: str, level: float) -> str:
     )
 
 
-def chart_url(chart_base: str, symbol: str, tf: str, lines: List[float]) -> str:
-    ls = ",".join(_fmt_price(x) for x in lines)
-    return (f"{chart_base}/chart/alert?symbol={symbol.replace('/', '')}"
-            f"&timeframe={tf}&cross_lines={ls}")
+def chart_url(chart_base: str, symbol: str, tf: str,
+              lines: Optional[List[float]] = None,
+              trend_lines: Optional[List[tuple]] = None) -> str:
+    """Alert chart URL. `lines` = horizontal levels; `trend_lines` =
+    [(x1_ms, y1, x2_ms, y2)] sloped boundary segments extrapolated from the
+    structure's pivots (user rule 2026-09-16: draw the real boundary lines,
+    not just horizontal values)."""
+    url = (f"{chart_base}/chart/alert?symbol={symbol.replace('/', '')}"
+           f"&timeframe={tf}")
+    if lines:
+        url += "&cross_lines=" + ",".join(_fmt_price(x) for x in lines)
+    if trend_lines:
+        segs = "|".join(
+            f"{int(round(x1))},{y1:.10g},{int(round(x2))},{y2:.10g}"
+            for (x1, y1, x2, y2) in trend_lines)
+        url += "&trend_lines=" + quote(segs, safe=",|")
+    return url
 
 
 class Telegram:
@@ -130,10 +144,11 @@ class Telegram:
 
 async def fetch_chart(
     session: aiohttp.ClientSession, base_url: str, symbol: str, tf: str,
-    lines: List[float],
+    lines: Optional[List[float]] = None,
+    trend_lines: Optional[List[tuple]] = None,
 ) -> Optional[bytes]:
     """Alert chart PNG from the chart service (:8002). None on failure."""
-    url = chart_url(base_url, symbol, tf, lines)
+    url = chart_url(base_url, symbol, tf, lines, trend_lines)
     try:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as r:
             if r.status == 200:

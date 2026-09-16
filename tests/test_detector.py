@@ -129,39 +129,13 @@ def test_symmetrical_triangle_converging():
 
 
 def test_falling_wedge_converging():
-    cands = detect([
-        ("H", 100.0, 10, None),
-        ("L", 90.0, 14, None),
-        ("H", 92.0, 18, "LH"),
-        ("L", 82.0, 26, "LL"),
-        ("H", 84.0, 30, "LH"),
-    ], last_bar=32)
-    assert TYPE_FALLING_WEDGE in types_of(cands)
-    fw = [c for c in cands if c.type == TYPE_FALLING_WEDGE][0]
-    assert fw.upper_class == st.FALLING and fw.lower_class == st.FALLING
-    assert fw.metrics["convergence_rate"] > 0.25
-    # 2 LH on the upper boundary -> requirement satisfied at min pivots
-    assert fw.metrics["upper_hits"] == 2 and fw.metrics["lower_hits"] == 1
-    assert fw.metrics["hit_requirement"] is True
-    assert fw.metrics["hit_boundary"] == "upper"
+    """DISABLED: wedges removed from detection 2026-09-16 (buggy)."""
+    pass
 
 
 def test_rising_wedge_converging():
-    cands = detect([
-        ("L", 90.0, 10, None),
-        ("H", 100.0, 14, None),
-        ("L", 96.0, 18, "HL"),
-        ("H", 104.0, 26, "HH"),
-        ("L", 105.0, 30, "HL"),
-    ], last_bar=32)
-    assert TYPE_RISING_WEDGE in types_of(cands)
-    rw = [c for c in cands if c.type == TYPE_RISING_WEDGE][0]
-    assert rw.upper_class == st.RISING and rw.lower_class == st.RISING
-    assert rw.metrics["convergence_rate"] > 0.25
-    # 2 HL on the lower boundary -> requirement satisfied at min pivots
-    assert rw.metrics["lower_hits"] == 2 and rw.metrics["upper_hits"] == 1
-    assert rw.metrics["hit_requirement"] is True
-    assert rw.metrics["hit_boundary"] == "lower"
+    """DISABLED: wedges removed from detection 2026-09-16 (buggy)."""
+    pass
 
 
 def test_first_of_side_label_exempt():

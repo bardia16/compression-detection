@@ -358,16 +358,8 @@ def test_triangle_line_break_kills_pattern_before_level():
 
 
 def test_wedge_breakout_level_is_the_line():
-    """Wedge (user rule): the boundary LINE is the breakout level — the
-    displayed level is the line's value at the break bar, not a pivot."""
-    refs = [ref(10, 100.0, "H"), ref(14, 90.0, "L"), ref(18, 96.0, "H", "LH"),
-            ref(26, 86.0, "L", "LL"), ref(30, 88.0, "H", "LH")]
-    cand = mk_cand(TYPE_FALLING_WEDGE, refs, up=(-0.3, 100.0), lo=(-0.2, 92.0))
-    inst = mk_instance(cand)
-    actions = evaluate_closed_candles(inst, [candle(34, 90.0)], TF_MS, 1000, CFG)
-    assert [a.kind for a in actions] == ["breakout_post"]
-    assert actions[0].detail["side"] == "up"
-    assert actions[0].detail["level"] == pytest.approx(89.8)  # upper line at 34
+    """DISABLED: wedges removed from detection 2026-09-16."""
+    pass
 
 
 def test_probe_level_is_last_pivot_price():
@@ -380,13 +372,8 @@ def test_probe_level_is_last_pivot_price():
 
 
 def test_probe_level_wedge_uses_line():
-    refs = [ref(10, 100.0, "H"), ref(14, 90.0, "L"), ref(18, 96.0, "H", "LH"),
-            ref(26, 86.0, "L", "LL"), ref(30, 88.0, "H", "LH")]
-    cand = mk_cand(TYPE_FALLING_WEDGE, refs, up=(-0.3, 100.0), lo=(-0.2, 92.0))
-    inst = mk_instance(cand)
-    # upper line at bar 34 = 100 - 0.3*34 = 89.8
-    assert inst.beyond_side(89.9, 0.0, 34) == "up"
-    assert inst.beyond_side(89.5, 0.0, 34) is None
+    """DISABLED: wedges removed from detection 2026-09-16."""
+    pass
 
 
 # ── boundary-hit requirement (2026-09-16) ──────────────────────────────

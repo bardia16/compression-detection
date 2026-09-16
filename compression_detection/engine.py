@@ -282,16 +282,22 @@ class Engine:
                 caption = nt.fmt_breakout(inst, detail["side"], detail["level"])
                 x2 = (candles[-1].ts + TF_MS[inst.tf]) if candles \
                     else inst.pivots[-1]["ts"]
-                if inst.type == "box":
-                    img = await self._chart(ses, inst, [detail["level"]], None)
-                else:
-                    segs = inst.trend_segments(TF_MS[inst.tf], x2)
-                    img = await self._chart(ses, inst, [detail["level"]], segs)
+                # For triangles the flat boundary IS the breakout level —
+                # sending both creates a duplicate horizontal line on the
+                # chart (user rule 2026-09-16).  Only send the level
+                # cross_line when the breakout is on the sloped side.
+                segs = inst.trend_segments(TF_MS[inst.tf], x2) \
+                    if inst.type != "box" else None
+                _flat_side = ("up" if inst.type == "ascending_triangle"
+                              else "down" if inst.type == "descending_triangle"
+                              else None)
+                chart_level = None if detail["side"] == _flat_side \
+                    else [detail["level"]]
                 # reply-thread onto this structure's compression confirmation
                 # message (user rule 2026-09-16); standalone if none was sent
                 reply_to = inst.msg_ids[0] if inst.msg_ids else None
                 mid = None
-                if img is not None:
+                if img := await self._chart(ses, inst, chart_level, segs):
                     mid = await self.tg.post_photo(caption, img, reply_to)
                 if mid is None:
                     mid = await self.tg.post(caption, reply_to)
@@ -383,16 +389,19 @@ class Engine:
             if level is None:      # defensive; side != None implies the level exists
                 continue
             caption = nt.fmt_breakout(inst, side, level)
-            if inst.type == "box":
-                img = await self._chart(ses, inst, [level], None)
-            else:
-                segs = inst.trend_segments(tf_ms, open_ms)
-                img = await self._chart(ses, inst, [level], segs)
+            # For triangles the flat boundary IS the breakout level —
+            # sending both creates a duplicate horizontal line.
+            segs = inst.trend_segments(tf_ms, open_ms) \
+                if inst.type != "box" else None
+            _flat_side = ("up" if inst.type == "ascending_triangle"
+                          else "down" if inst.type == "descending_triangle"
+                          else None)
+            chart_level = None if side == _flat_side else [level]
             # heads-up threads onto this structure's compression confirmation
             # message (user rule 2026-09-16); standalone if none was sent
             reply_to = inst.msg_ids[0] if inst.msg_ids else None
             mid = None
-            if img is not None:
+            if img := await self._chart(ses, inst, chart_level, segs):
                 mid = await self.tg.post_photo(caption, img, reply_to)
             if mid is None:
                 mid = await self.tg.post(caption, reply_to)

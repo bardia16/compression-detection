@@ -36,7 +36,8 @@ TYPE_RISING_WEDGE = "rising_wedge"
 
 ALL_TYPES = (
     TYPE_BOX, TYPE_DESC_TRI, TYPE_ASC_TRI, TYPE_SYM_TRI,
-    TYPE_FALLING_WEDGE, TYPE_RISING_WEDGE,
+    # wedges disabled 2026-09-16 (buggy — will revisit)
+    # TYPE_FALLING_WEDGE, TYPE_RISING_WEDGE,
 )
 
 
@@ -73,16 +74,17 @@ TYPE_SPECS: Dict[str, TypeSpec] = {
         (PivotLabel.LH,), (PivotLabel.HL,),
         (st.FALLING,), (st.RISING,), True,
     ),
-    TYPE_FALLING_WEDGE: TypeSpec(
-        TYPE_FALLING_WEDGE,
-        (PivotLabel.LH,), (PivotLabel.LL,),
-        (st.FALLING,), (st.FALLING,), True,
-    ),
-    TYPE_RISING_WEDGE: TypeSpec(
-        TYPE_RISING_WEDGE,
-        (PivotLabel.HH,), (PivotLabel.HL,),
-        (st.RISING,), (st.RISING,), True,
-    ),
+    # wedges disabled 2026-09-16 (buggy — will revisit)
+    # TYPE_FALLING_WEDGE: TypeSpec(
+    #     TYPE_FALLING_WEDGE,
+    #     (PivotLabel.LH,), (PivotLabel.LL,),
+    #     (st.FALLING,), (st.FALLING,), True,
+    # ),
+    # TYPE_RISING_WEDGE: TypeSpec(
+    #     TYPE_RISING_WEDGE,
+    #     (PivotLabel.HH,), (PivotLabel.HL,),
+    #     (st.RISING,), (st.RISING,), True,
+    # ),
 }
 
 

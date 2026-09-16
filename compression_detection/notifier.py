@@ -112,19 +112,25 @@ class Telegram:
         ) as r:
             return await r.json(content_type=None)
 
-    async def post(self, text: str) -> Optional[int]:
-        d = await self._api("sendMessage", text=text, parse_mode="HTML")
+    async def post(self, text: str, reply_to_id: Optional[int] = None) -> Optional[int]:
+        params = {"text": text, "parse_mode": "HTML"}
+        if reply_to_id:
+            params["reply_to_message_id"] = reply_to_id
+        d = await self._api("sendMessage", **params)
         if d.get("ok"):
             return d["result"]["message_id"]
         log.warning("tg post failed: %s", d)
         return None
 
-    async def post_photo(self, caption: str, image: bytes) -> Optional[int]:
+    async def post_photo(self, caption: str, image: bytes,
+                         reply_to_id: Optional[int] = None) -> Optional[int]:
         ses = await self._session()
         form = aiohttp.FormData()
         form.add_field("chat_id", str(self.chat_id))
         form.add_field("caption", caption)
         form.add_field("parse_mode", "HTML")
+        if reply_to_id:
+            form.add_field("reply_to_message_id", str(reply_to_id))
         form.add_field("photo", image, filename="alert.png",
                        content_type="image/png")
         try:

@@ -38,11 +38,18 @@ compression + breakout alerts to the **Breakouts** Telegram channel
   silently invalidated (pending probe retracted). Never confused with a
   breakout (level breaks are classified first). A triangle whose line is
   already broken at detection time is never created.
+- **Threading (user rule 2026-09-16):** breakout messages (heads-up and
+  final) are posted as a **reply to the structure's compression
+  confirmation message** — compression + its breakout read as one thread
+  in the channel. If no compression message was ever sent for that
+  structure, the breakout posts standalone.
 - **Charts (user rules 2026-09-16):** **triangles/wedges** draw the two
   extrapolated boundary lines, each starting at its own first pivot (no
-  left overhang); **boxes** draw plain horizontals at their last pivot
-  levels (same values as their breakout levels). No extrapolation for
-  ranges. Equality of EH/EL stays ATR-based (the label logic).
+  left overhang); the FLAT side of a triangle (desc base / asc top) is
+  drawn strictly HORIZONTAL at that side's last pivot; **boxes** draw
+  plain horizontals at their last pivot levels (same values as their
+  breakout levels). No extrapolation for ranges. Equality of EH/EL is
+  ATR-based across the pivot pair (the label logic).
 - **Boundary-hit requirement (spec 2026-09-16):** a structure cannot
   reach CONFIRMED (or beyond) until at least one of its boundaries has
   **≥2 distinct confirmed pivot hits** (`min_boundary_hits` in config).

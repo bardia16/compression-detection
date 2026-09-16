@@ -32,16 +32,18 @@ def mk_candles(closes):
 class FakeTG:
     def __init__(self):
         self.posts = []
+        self.replies = []          # reply_to ids aligned with posts
         self.deletes = []
         self._n = 100
 
-    async def post(self, text):
+    async def post(self, text, reply_to_id=None):
         self.posts.append(text)
+        self.replies.append(reply_to_id)
         self._n += 1
         return self._n
 
-    async def post_photo(self, caption, img):
-        return await self.post(caption)
+    async def post_photo(self, caption, img, reply_to_id=None):
+        return await self.post(caption, reply_to_id)
 
     async def delete(self, mid, why=""):
         self.deletes.append(mid)
@@ -129,12 +131,15 @@ def test_breakout_close_fires_end_to_end(cfg, monkeypatch):
     e1, res1 = scan(cfg, tg=tg)
     assert len(tg.posts) == 1
     assert "Compression" in tg.posts[0]
+    assert tg.replies[0] is None                    # compression = root message
 
     # scan 2: breakout candle closes above the upper boundary (~103)
     closes2 = box_closes() + [104.5]
     patch_env(monkeypatch, closes2)
     e2, res2 = scan(cfg, tg=tg)
     assert any("Breakout" in p and "above" in p for p in tg.posts)
+    # breakout replies onto the compression confirmation message
+    assert tg.replies[-1] == 101
     d = json.loads(cfg.state_path.read_text())
     inst = list(d["instances"].values())[0]
     assert inst["state"] == "breakout"
@@ -143,6 +148,26 @@ def test_breakout_close_fires_end_to_end(cfg, monkeypatch):
     # scan 3: terminal — no further actions
     e3, res3 = scan(cfg, tg=tg)
     assert res3["summary"]["actions"] == []
+
+
+def test_breakout_without_compression_message_sends_standalone(cfg, monkeypatch):
+    """No compression confirmation was ever sent -> the breakout goes out
+    normally (no reply target)."""
+    tg = FakeTG()
+    cfg.notif_enabled = True
+    patch_env(monkeypatch, box_closes())
+    e1, res1 = scan(cfg)
+    # simulate: the compression message was never sent (msg_ids empty)
+    s = json.loads(cfg.state_path.read_text())
+    for inst in s["instances"].values():
+        inst["msg_ids"] = []
+        inst["notified"]["compression"] = False
+    cfg.state_path.write_text(json.dumps(s))
+
+    patch_env(monkeypatch, box_closes() + [104.5])
+    e2, res2 = scan(cfg, tg=tg)
+    assert any("Breakout" in p for p in tg.posts)
+    assert tg.replies[-1] is None                   # standalone send
 
 
 def test_held_notifications_flush_on_enable(cfg, monkeypatch):

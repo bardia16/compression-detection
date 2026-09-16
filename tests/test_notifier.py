@@ -96,3 +96,28 @@ def test_chart_url_lines_and_trend_lines():
                   [0.0008724], [(1788523200000, 0.001, 1789531200000, 0.0008)])
     assert "&cross_lines=0.0008724" in u
     assert "&trend_lines=1788523200000,0.001,1789531200000,0.0008" in u
+
+
+def test_post_passes_reply_to_message_id(monkeypatch):
+    """Breakout messages thread onto their compression confirmation
+    (user rule 2026-09-16)."""
+    import asyncio
+    from compression_detection.notifier import Telegram
+
+    tg = Telegram("tok", "chat")
+    captured = {}
+
+    async def fake_api(method, **params):
+        captured.update(params)
+        captured["method"] = method
+        return {"ok": True, "result": {"message_id": 7}}
+
+    monkeypatch.setattr(tg, "_api", fake_api)
+    mid = asyncio.run(tg.post("hi", reply_to_id=42))
+    assert mid == 7
+    assert captured["method"] == "sendMessage"
+    assert captured["reply_to_message_id"] == 42
+
+    captured.clear()
+    asyncio.run(tg.post("hi"))                      # standalone: no reply key
+    assert "reply_to_message_id" not in captured

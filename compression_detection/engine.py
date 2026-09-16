@@ -287,18 +287,21 @@ class Engine:
                 else:
                     segs = inst.trend_segments(TF_MS[inst.tf], x2)
                     img = await self._chart(ses, inst, [detail["level"]], segs)
+                # reply-thread onto this structure's compression confirmation
+                # message (user rule 2026-09-16); standalone if none was sent
+                reply_to = inst.msg_ids[0] if inst.msg_ids else None
                 mid = None
                 if img is not None:
-                    mid = await self.tg.post_photo(caption, img)
+                    mid = await self.tg.post_photo(caption, img, reply_to)
                 if mid is None:
-                    mid = await self.tg.post(caption)
+                    mid = await self.tg.post(caption, reply_to)
                 sends.append({"kind": kind, "id": inst.id, "msg_id": mid})
                 if mid is not None:
                     inst.msg_ids.append(mid)
                     inst.notified["breakout"] = True
                 self.audit.write({"event": "post", "kind": kind, "id": inst.id,
                                   "side": detail.get("side"), "msg_id": mid,
-                                  "chart": img is not None})
+                                  "reply_to": reply_to, "chart": img is not None})
 
             elif kind == "breakout_keep":
                 self.audit.write({"event": "breakout_confirmed", "id": inst.id,
@@ -385,18 +388,22 @@ class Engine:
             else:
                 segs = inst.trend_segments(tf_ms, open_ms)
                 img = await self._chart(ses, inst, [level], segs)
+            # heads-up threads onto this structure's compression confirmation
+            # message (user rule 2026-09-16); standalone if none was sent
+            reply_to = inst.msg_ids[0] if inst.msg_ids else None
             mid = None
             if img is not None:
-                mid = await self.tg.post_photo(caption, img)
+                mid = await self.tg.post_photo(caption, img, reply_to)
             if mid is None:
-                mid = await self.tg.post(caption)
+                mid = await self.tg.post(caption, reply_to)
             if mid is not None:
                 inst.probe_msg_id = mid
                 inst.probe_candle_ms = open_ms
                 inst.probe_side = side
                 posted += 1
                 self.audit.write({"event": "probe_post", "id": inst.id,
-                                  "side": side, "level": level, "msg_id": mid})
+                                  "side": side, "level": level, "msg_id": mid,
+                                  "reply_to": reply_to})
         if dirty:
             self._save_state()
         return posted

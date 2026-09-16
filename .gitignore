@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+structure_state.json
+pending_state.json
+scan_reports/
+logs/
+audit/

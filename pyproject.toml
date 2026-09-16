@@ -1,0 +1,8 @@
+[project]
+name = "compression-detection"
+version = "0.1.0"
+description = "DAW-theory compression structure detector (Box / Triangles / Wedges) with Telegram alerts"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

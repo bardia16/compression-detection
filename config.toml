@@ -1,0 +1,55 @@
+[project]
+timeframes = ["15m", "1h", "4h"]
+candle_limit = 400             # per TF (15m≈4d, 1h≈16d, 4h≈66d)
+
+[zigzag]
+coef = 1.2                     # mirrors daw-theory live (2026-09-15)
+atr_length = 7
+
+[labels]
+atr14_length = 14
+atr14_method = "close_only"
+
+[detection]
+max_window_pivots = 12         # cap on pivots used per candidate window
+max_pivot_age_bars = 96        # pivots older than this (own TF) ignored for windows
+flat_tol_atr = 1.0             # |Δ boundary across side span| ≤ this → flat
+boundary_tol_atr = 1.0         # pivot must sit within this of its boundary line
+min_convergence_pct = 25.0     # % width shrink required (first→last)
+max_width_bounce_frac = 0.10   # per-step non-monotonic slack in width samples
+confirm_extra_pivots = 1       # extra pivots over min → CONFIRMED
+established_extra_pivots = 2   # extra pivots over min → ESTABLISHED (→ COMPRESSING)
+selection_order = ["box", "descending_triangle", "ascending_triangle", "symmetrical_triangle", "falling_wedge", "rising_wedge"]
+
+[detection.min_pivots]
+box = 4
+descending_triangle = 4
+ascending_triangle = 4
+symmetrical_triangle = 4
+falling_wedge = 5
+rising_wedge = 5
+
+[scan]
+offset_s = 90                  # run 90s after each 15m boundary
+catchup_max_candles = 8        # per instance: cap catch-up checks after downtime
+
+[universe]
+min_volume_btc = 100           # same LCW fetch as daw/watchlist, independent project
+lcw_limit = 300
+
+[breakout]
+probe_warn_s = 180             # probe at T−3:00 before the structure TF's candle close
+probe_loop_s = 30              # probe check cadence
+breakout_buffer_atr = 0.0      # live/close strictly beyond boundary
+
+[notifications]
+enabled = false                # flip to true after Bardia approves notification formats
+notify_min_state = "confirmed" # compression message when instance reaches this state
+notify_on_compress_upgrade = false
+notify_invalidation = false
+best_only_per_coin_tf = true
+chart_url = "http://localhost:8002"
+
+[state]
+path = "/root/compression-detection/structure_state.json"
+prune_after_days = 30

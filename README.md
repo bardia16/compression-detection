@@ -50,6 +50,12 @@ compression + breakout alerts to the **Breakouts** Telegram channel
   plain horizontals at their last pivot levels (same values as their
   breakout levels). No extrapolation for ranges. Equality of EH/EL is
   ATR-based across the pivot pair (the label logic).
+- **Interior close integrity (user rule 2026-09-17):** candle closes
+  between the window's first and last pivot must stay within the
+  boundaries. A close beyond a boundary by more than
+  `close_breach_tol_atr` (0.5) × ATR counts as a breach; more than
+  `max_close_breaches` (2) breaches on any side rejects the candidate
+  (BTW case: 37 closes below the fitted lower line).
 - **Boundary-hit requirement (spec 2026-09-16):** a structure cannot
   reach CONFIRMED (or beyond) until at least one of its boundaries has
   **≥2 distinct confirmed pivot hits** (`min_boundary_hits` in config).

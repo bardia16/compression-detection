@@ -116,16 +116,16 @@ def state_for_level(level: str) -> str:
 
 
 def state_for_candidate(level: str, metrics: dict, cfg) -> str:
-    """Level + the global boundary-hit gate (spec 2026-09-16): a structure
-    cannot reach CONFIRMED (or beyond) until at least one of its boundaries
-    has >= `min_boundary_hits` distinct CONFIRMED pivot hits. Below the
-    requirement it stays DETECTED (live pivots never count — they are not
-    in the window at all)."""
-    if level == LEVEL_DETECTED:
-        return STATE_DETECTED
+    """Level + the global boundary-hit gate (revised 2026-09-16): a
+    structure cannot reach CONFIRMED (or beyond) until at least one side
+    has >= `min_boundary_hits` pivots (confirmed or live).  If the gate
+    passes at DETECTED level the instance is promoted straight to
+    CONFIRMED (one side with ≥2 pivots is enough — user 2026-09-16)."""
     hits = max(int(metrics.get("upper_hits", 0)), int(metrics.get("lower_hits", 0)))
     if hits < int(getattr(cfg, "min_boundary_hits", 2)):
         return STATE_DETECTED
+    if level == LEVEL_DETECTED:
+        return STATE_CONFIRMED  # gate passes → skip detected, confirm
     return _LEVEL_TO_STATE[level]
 
 

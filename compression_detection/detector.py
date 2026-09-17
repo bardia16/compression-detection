@@ -277,15 +277,12 @@ def _check_window(
         "lower_at_last_bar": lower.at(refs[-1].abs_bar),
     }
 
-    # Boundary-hit counts (global confirmation rule, spec 2026-09-16):
-    # distinct CONFIRMED pivots carrying the boundary's canonical label.
-    # Live/developing pivots can never appear here — windows are built from
-    # confirmed pivots only. Confirmation (CONFIRMED and beyond) requires
-    # max(upper_hits, lower_hits) >= cfg.min_boundary_hits.
-    upper_hit_set = {l.value for l in spec.upper_labels}
-    lower_hit_set = {l.value for l in spec.lower_labels}
-    upper_hits = sum(1 for r in highs if r.label in upper_hit_set)
-    lower_hits = sum(1 for r in lows if r.label in lower_hit_set)
+    # Boundary-hit counts (confirmation rule, 2026-09-16 revised):
+    # at least one side must have >= `min_boundary_hits` pivots (confirmed
+    # or live).  Only ONE side needs the count — the last pivot completing
+    # the pair can be live/unconfirmed (user rule 2026-09-16).
+    upper_hits = len(highs)
+    lower_hits = len(lows)
     metrics["upper_hits"] = upper_hits
     metrics["lower_hits"] = lower_hits
     metrics["hit_requirement"] = max(upper_hits, lower_hits) >= cfg.min_boundary_hits

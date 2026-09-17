@@ -67,10 +67,10 @@ def test_box_min_4_pivots():
     box = [c for c in cands if c.type == TYPE_BOX][0]
     assert box.pivot_count == 4
     assert box.upper_class == st.FLAT and box.lower_class == st.FLAT
-    # 1 EH + 1 EL -> boundary-hit requirement not yet satisfied (4 pivots)
-    assert box.metrics["upper_hits"] == 1 and box.metrics["lower_hits"] == 1
-    assert box.metrics["hit_requirement"] is False
-    assert box.metrics["hit_boundary"] == ""
+    # 4 pivots -> 2 highs + 2 lows: boundary-hit gate satisfied
+    assert box.metrics["upper_hits"] == 2 and box.metrics["lower_hits"] == 2
+    assert box.metrics["hit_requirement"] is True
+    assert box.metrics["hit_boundary"] == "upper"
 
 
 def test_box_larger_window_ranked_first():
@@ -84,9 +84,9 @@ def test_box_larger_window_ranked_first():
     ], last_bar=32)
     assert cands[0].type == TYPE_BOX
     assert cands[0].pivot_count == 6
-    # second EH + second EL -> requirement satisfied
-    assert cands[0].metrics["upper_hits"] == 2
-    assert cands[0].metrics["lower_hits"] == 2
+    # 3 highs + 3 lows -> requirement satisfied
+    assert cands[0].metrics["upper_hits"] == 3
+    assert cands[0].metrics["lower_hits"] == 3
     assert cands[0].metrics["hit_requirement"] is True
     assert cands[0].metrics["hit_boundary"] == "upper"
 

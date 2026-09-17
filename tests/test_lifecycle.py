@@ -40,11 +40,8 @@ def ref(bar, price, side, label=None):
 
 def mk_cand(type_name, refs, up=(0.0, 100.0), lo=(0.0, 90.0), atr=2.0,
             up_cls=st.FLAT, lo_cls=st.FLAT):
-    spec = TYPE_SPECS[type_name]
-    upper_hit_set = {l.value for l in spec.upper_labels}
-    lower_hit_set = {l.value for l in spec.lower_labels}
-    uh = sum(1 for r in refs if r.is_high and r.label in upper_hit_set)
-    lh = sum(1 for r in refs if not r.is_high and r.label in lower_hit_set)
+    uh = sum(1 for r in refs if r.is_high)
+    lh = sum(1 for r in refs if not r.is_high)
     meta = {"fit_err_atr": 0.1, "pivot_count": len(refs),
             "upper_hits": uh, "lower_hits": lh}
     return Candidate(
@@ -113,22 +110,29 @@ def test_confirmed_creation_notifies_once():
 
 
 def test_detected_only_then_upgrade_notifies():
+    """4-pivot box: gate passes (2 highs + 2 lows) → straight to
+    CONFIRMED + notification.  Upgrade to COMPRESSING at 6 pivots."""
     refs4, cand4 = box_refs(n=4)
     instances = {}
     actions = update_for_scan(instances, "AAA", "15m", [cand4], [], TF_MS, 1000, CFG)
-    assert actions == []                      # detected < confirmed: silent
+    kinds = [a.kind for a in actions]
+    assert "compression_notify" in kinds
+    mark_notified(instances, actions)
     inst = list(instances.values())[0]
-    assert inst.state == STATE_DETECTED
-    # boundary-hit requirement: 1 EH + 1 EL -> not yet satisfied
-    assert inst.metrics["upper_hits"] == 1 and inst.metrics["lower_hits"] == 1
+    assert inst.state == STATE_CONFIRMED
+    assert inst.metrics["upper_hits"] == 2 and inst.metrics["lower_hits"] == 2
 
+    # 5-pivot scan: still confirmed, already notified — no new actions
     refs5, cand5 = box_refs(n=5)
     actions2 = update_for_scan(instances, "AAA", "15m", [cand5], [], TF_MS, 1060, CFG)
-    kinds = [a.kind for a in actions2]
-    assert "upgrade" in kinds and "compression_notify" in kinds
-    assert inst.state == STATE_CONFIRMED
-    # second EH confirmed -> requirement satisfied (2 hits on the upper)
-    assert inst.metrics["upper_hits"] == 2
+    assert [a.kind for a in actions2 if a.kind != "skip_create"] == []
+
+    # 6-pivot scan: compressing → upgrade
+    refs6, cand6 = box_refs(n=6)
+    actions3 = update_for_scan(instances, "AAA", "15m", [cand6], [], TF_MS, 1120, CFG)
+    assert "upgrade" in [a.kind for a in actions3]
+    assert inst.state == STATE_COMPRESSING
+    assert inst.metrics["upper_hits"] == 3
 
 
 def test_established_upgrades_to_compressing_single_notify():
@@ -249,7 +253,7 @@ def test_probe_verdict_retract_on_failed_close():
     actions = evaluate_closed_candles(inst, [candle(31, 99.0)], TF_MS, 1000, CFG)
     assert [a.kind for a in actions] == ["retract"]
     assert actions[0].detail["msg_id"] == 555
-    assert inst.state == STATE_DETECTED           # still active (4-pivot instance)
+    assert inst.state == STATE_CONFIRMED           # still active (4-pivot instance)
     assert inst.probe_msg_id is None
 
 
@@ -386,14 +390,16 @@ def test_state_for_candidate_hit_gate():
     # below requirement -> stays DETECTED even at confirmed/established levels
     assert state_for_candidate("confirmed", {"upper_hits": 1, "lower_hits": 1}, CFG) == STATE_DETECTED
     assert state_for_candidate("established", {"upper_hits": 1, "lower_hits": 0}, CFG) == STATE_DETECTED
-    # detected level never confirms regardless of hits
-    assert state_for_candidate("detected", {"upper_hits": 5, "lower_hits": 5}, CFG) == STATE_DETECTED
+    # detected level with gate passing -> promoted to CONFIRMED
+    assert state_for_candidate("detected", {"upper_hits": 5, "lower_hits": 5}, CFG) == STATE_CONFIRMED
+    # detected level with gate failing -> stays DETECTED
+    assert state_for_candidate("detected", {"upper_hits": 0, "lower_hits": 0}, CFG) == STATE_DETECTED
 
 
 def test_hit_requirement_exposed_on_instance():
     refs, cand = box_refs(n=6)
     inst = mk_instance(cand)
-    assert inst.metrics["upper_hits"] == 2 and inst.metrics["lower_hits"] == 2
+    assert inst.metrics["upper_hits"] == 3 and inst.metrics["lower_hits"] == 3
     assert inst.state == STATE_COMPRESSING            # 6 pivots + gate satisfied
 
 

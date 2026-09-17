@@ -71,6 +71,8 @@ class Config:
             confirm_extra_pivots=int(det_raw["confirm_extra_pivots"]),
             established_extra_pivots=int(det_raw["established_extra_pivots"]),
             min_boundary_hits=int(det_raw.get("min_boundary_hits", 2)),
+            close_breach_tol_atr=float(det_raw.get("close_breach_tol_atr", 0.5)),
+            max_close_breaches=int(det_raw.get("max_close_breaches", 2)),
             selection_order=tuple(det_raw.get("selection_order") or ALL_TYPES),
         )
 

@@ -100,6 +100,13 @@ class DetectConfig:
     confirm_extra_pivots: int = 1
     established_extra_pivots: int = 2
     min_boundary_hits: int = 2
+    # Interior close integrity (user rule 2026-09-17, BTW case): a boundary
+    # "broken several times" by candle CLOSES inside the window means the
+    # structure was never a compression.  A close beyond a boundary by more
+    # than close_breach_tol_atr × ATR counts as a breach; more than
+    # max_close_breaches breaches on any side rejects the candidate.
+    close_breach_tol_atr: float = 0.5
+    max_close_breaches: int = 2
     selection_order: Tuple[str, ...] = ALL_TYPES
 
 
@@ -204,6 +211,7 @@ def _check_window(
     refs: Sequence[PivotRef],
     atr14_series: List[Optional[float]],
     cfg: DetectConfig,
+    close_by_bar: Optional[Dict[int, float]] = None,
 ) -> Optional[Candidate]:
     highs = [r for r in refs if r.is_high]
     lows = [r for r in refs if not r.is_high]
@@ -289,6 +297,34 @@ def _check_window(
     metrics["hit_boundary"] = ("upper" if upper_hits >= cfg.min_boundary_hits
                                else "lower" if lower_hits >= cfg.min_boundary_hits else "")
 
+    # Interior close integrity (user rule 2026-09-17): candle CLOSES between
+    # the window's first and last pivot must stay within the boundaries —
+    # a line broken several times by closes was never a compression (BTW
+    # case: 48 closes below the fitted lower line).  Tolerance absorbs
+    # fit/noise: close beyond by > close_breach_tol_atr × ATR = a breach.
+    if close_by_bar is not None:
+        b0, b1 = refs[0].abs_bar, refs[-1].abs_bar
+        tol = cfg.close_breach_tol_atr * atr
+        up_breaches = lo_breaches = 0
+        worst_breach = 0.0
+        for b in range(b0, b1 + 1):
+            cl = close_by_bar.get(b)
+            if cl is None:
+                continue
+            u = upper.at(b)
+            l = lower.at(b)
+            if cl > u + tol:
+                up_breaches += 1
+                worst_breach = max(worst_breach, (cl - u) / atr)
+            elif cl < l - tol:
+                lo_breaches += 1
+                worst_breach = max(worst_breach, (l - cl) / atr)
+        metrics["close_breaches_upper"] = up_breaches
+        metrics["close_breaches_lower"] = lo_breaches
+        metrics["worst_close_breach_atr"] = worst_breach
+        if max(up_breaches, lo_breaches) > cfg.max_close_breaches:
+            return None
+
     if spec.converging:
         sample_from = max(highs[0].abs_bar, lows[0].abs_bar)
         sample_bars = sorted({r.abs_bar for r in refs if r.abs_bar >= sample_from})
@@ -319,6 +355,7 @@ def detect_candidates(
     tf_ms: int,
     last_closed_abs_bar: int,
     cfg: DetectConfig,
+    candles: Optional[Sequence] = None,
 ) -> List[Candidate]:
     """All valid candidates across all types and trailing window sizes.
 
@@ -326,6 +363,8 @@ def detect_candidates(
     than cfg.max_pivot_age_bars are ignored. Every window size from the
     type minimum up to max_window_pivots is tried, so the most established
     (largest) valid windows rank first.
+
+    `candles` (optional) enables the interior close-integrity check.
     """
     refs: List[PivotRef] = []
     for p, label in labeled:
@@ -340,6 +379,10 @@ def detect_candidates(
     if not refs:
         return []
 
+    close_by_bar: Optional[Dict[int, float]] = None
+    if candles is not None:
+        close_by_bar = {int(c.ts // tf_ms): float(c.close) for c in candles}
+
     out: List[Candidate] = []
     for type_name in ALL_TYPES:
         spec = TYPE_SPECS[type_name]
@@ -347,7 +390,7 @@ def detect_candidates(
         top_k = min(cfg.max_window_pivots, len(refs))
         for k in range(min_k, top_k + 1):
             window = refs[-k:]
-            cand = _check_window(spec, window, atr14_series, cfg)
+            cand = _check_window(spec, window, atr14_series, cfg, close_by_bar)
             if cand is not None:
                 out.append(cand)
     return rank_candidates(out, cfg.selection_order)

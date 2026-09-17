@@ -127,7 +127,8 @@ class Engine:
         atr14 = atr_series(candles, self.cfg.atr14_length, self.cfg.atr14_method)
         labeled = label_all_pivots(pivots, atr14)
         last_bar = candles[-1].ts // tf_ms
-        cands = detect_candidates(labeled, atr14, tf_ms, last_bar, self.cfg.det)
+        cands = detect_candidates(labeled, atr14, tf_ms, last_bar, self.cfg.det,
+                                  candles=candles)
         return {"candles": candles, "pivots": pivots, "labeled": labeled,
                 "candidates": cands, "last_bar": last_bar}
 

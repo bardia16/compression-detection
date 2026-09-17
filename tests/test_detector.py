@@ -50,6 +50,20 @@ def detect(entries, last_bar, **cfg_over):
     )
 
 
+def candles_for(bars_closes):
+    from compression_detection.models import Candle
+    return [Candle(ts=b * TF_MS, open=c, high=c, low=c, close=c, volume=1.0)
+            for b, c in bars_closes]
+
+
+def detect_with_candles(entries, last_bar, candles, **cfg_over):
+    cfg = DetectConfig(min_pivots=MIN_PIVOTS, **cfg_over)
+    return detect_candidates(
+        entries_to_labeled(entries), atr_series(), TF_MS, last_bar, cfg,
+        candles=candles,
+    )
+
+
 def types_of(cands):
     return [c.type for c in cands]
 
@@ -136,6 +150,42 @@ def test_falling_wedge_converging():
 def test_rising_wedge_converging():
     """DISABLED: wedges removed from detection 2026-09-16 (buggy)."""
     pass
+
+
+# ── interior close integrity (2026-09-17, BTW case) ────────────────────
+
+ASC_ENTRIES = [
+    ("L", 90.0, 10, None),
+    ("H", 100.0, 30, None),
+    ("L", 94.0, 40, "HL"),
+    ("H", 100.5, 44, "EH"),
+]
+
+
+def test_interior_close_breaches_reject_candidate():
+    """A boundary 'broken several times' by closes inside the window means
+    the structure was never a compression (BTW case: 37 closes below the
+    fitted lower line)."""
+    lows = [(b, 91.0) for b in range(11, 40)]
+    cands = detect_with_candles(ASC_ENTRIES, 46, candles_for(lows))
+    assert TYPE_ASC_TRI not in types_of(cands)
+
+
+def test_interior_close_breaches_within_limit_accepted():
+    """Up to 2 fit-noise breaches are tolerated; metrics expose counts."""
+    noisy = [(b, 91.5) for b in (30, 35)]
+    clean = [(b, 96.0) for b in range(11, 40) if b not in (30, 35)]
+    cands = detect_with_candles(ASC_ENTRIES, 46, candles_for(noisy + clean))
+    assert TYPE_ASC_TRI in types_of(cands)
+    c = [x for x in cands if x.type == TYPE_ASC_TRI][0]
+    assert c.metrics["close_breaches_lower"] == 2
+    assert c.metrics["close_breaches_upper"] == 0
+
+
+def test_no_candles_no_close_check():
+    """Without candle data the interior check is skipped (pure-pivot mode)."""
+    cands = detect(ASC_ENTRIES, 46)
+    assert TYPE_ASC_TRI in types_of(cands)
 
 
 def test_first_of_side_label_exempt():

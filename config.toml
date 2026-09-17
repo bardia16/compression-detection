@@ -20,6 +20,8 @@ max_width_bounce_frac = 0.10   # per-step non-monotonic slack in width samples
 confirm_extra_pivots = 1       # extra pivots over min → CONFIRMED
 established_extra_pivots = 2   # extra pivots over min → ESTABLISHED (→ COMPRESSING)
 min_boundary_hits = 2          # global rule: ≥2 confirmed pivot hits on one boundary
+close_breach_tol_atr = 0.5     # close beyond boundary by > this × ATR = a breach
+max_close_breaches = 2         # >2 interior close breaches on a side → candidate rejected
 selection_order = ["box", "descending_triangle", "ascending_triangle", "symmetrical_triangle", "falling_wedge", "rising_wedge"]
 
 [detection.min_pivots]

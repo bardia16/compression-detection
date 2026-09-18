@@ -22,6 +22,7 @@ established_extra_pivots = 2   # extra pivots over min → ESTABLISHED (→ COMP
 min_boundary_hits = 2          # global rule: ≥2 confirmed pivot hits on one boundary
 close_breach_tol_atr = 0.5     # close beyond boundary by > this × ATR = a breach
 max_close_breaches = 2         # >2 interior close breaches on a side → candidate rejected
+box_range_mode = false         # range-mode box: touch clusters + internal swings allowed
 selection_order = ["box", "descending_triangle", "ascending_triangle", "symmetrical_triangle", "falling_wedge", "rising_wedge"]
 
 [detection.min_pivots]

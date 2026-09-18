@@ -50,6 +50,12 @@ compression + breakout alerts to the **Breakouts** Telegram channel
   plain horizontals at their last pivot levels (same values as their
   breakout levels). No extrapolation for ranges. Equality of EH/EL is
   ATR-based across the pivot pair (the label logic).
+- **Range-mode box (2026-09-17, JTO case, flag `box_range_mode`):** a
+  consolidation range is defined by touch clusters (≥2 high taps within
+  flat_tol_atr × ATR of the top, ≥2 lows near the bottom, the two sides'
+  touch spans overlapping in time, closes inside the envelope) — internal
+  swings between the taps are allowed. The strict model (every non-first
+  pivot EH/EL) rejected JTO 4H 0.40/0.466 despite 3 taps per side.
 - **Interior close integrity (user rule 2026-09-17):** candle closes
   between the window's first and last pivot must stay within the
   boundaries. A close beyond a boundary by more than

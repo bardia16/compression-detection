@@ -188,6 +188,67 @@ def test_no_candles_no_close_check():
     assert TYPE_ASC_TRI in types_of(cands)
 
 
+# ── range-mode box (2026-09-17, JTO case) ──────────────────────────────
+
+RANGE_ENTRIES = [
+    ("H", 102.0, 10, None),
+    ("L", 88.0, 14, None),
+    ("H", 97.0, 18, "LH"),      # internal swing — never touches a boundary
+    ("L", 95.0, 22, "HL"),      # internal swing
+    ("H", 101.5, 26, "EH"),
+    ("L", 88.5, 30, "EL"),
+]
+
+
+def test_range_box_rejected_when_flag_off():
+    """Strict model: interleaved internal swings break the EH/EL chain."""
+    cands = detect_with_candles(RANGE_ENTRIES, 32,
+                                candles_for([(b, 95.0) for b in range(10, 31)]))
+    assert TYPE_BOX not in types_of(cands)
+
+
+def test_range_box_detected_when_flag_on():
+    """Touch clusters + overlap → textbook range with internal swings."""
+    cands = detect_with_candles(
+        RANGE_ENTRIES, 32,
+        candles_for([(b, 95.0) for b in range(10, 31)]),
+        box_range_mode=True,
+    )
+    boxes = [c for c in cands if c.type == TYPE_BOX]
+    assert boxes
+    b = boxes[0]
+    assert b.metrics["mode"] == "range"
+    assert b.metrics["upper_touches"] == 2 and b.metrics["lower_touches"] == 2
+    assert b.metrics["upper_at_last_bar"] == 101.5
+    assert b.metrics["lower_at_last_bar"] == 88.5
+
+
+def test_range_box_needs_both_sides_tested_in_common_stretch():
+    """Ceiling taps long before floor taps (break + dead-cat) → reject."""
+    entries = [
+        ("H", 102.0, 10, None), ("L", 96.0, 20, None),
+        ("H", 101.0, 24, "LH"), ("L", 88.0, 60, "LL"),
+        ("H", 90.0, 64, "LH"), ("L", 88.5, 70, "EL"),
+    ]
+    cands = detect_with_candles(
+        entries, 72, candles_for([(b, 95.0) for b in range(10, 71)]),
+        box_range_mode=True,
+    )
+    assert TYPE_BOX not in types_of(cands)
+
+
+def test_range_box_needs_two_touches_per_side():
+    entries = [
+        ("H", 102.0, 10, None), ("H", 97.0, 14, "LH"),
+        ("L", 88.0, 20, None), ("L", 95.0, 24, "HL"),
+    ]
+    cands = detect_with_candles(
+        entries, 26, candles_for([(b, 95.0) for b in range(10, 25)]),
+        box_range_mode=True,
+    )
+    assert TYPE_BOX not in types_of(cands)
+
+
 def test_first_of_side_label_exempt():
     """Window's first high carries a non-canonical label — still valid
     (initial reference pivot exemption, spec §5)."""

@@ -107,6 +107,12 @@ class DetectConfig:
     # max_close_breaches breaches on any side rejects the candidate.
     close_breach_tol_atr: float = 0.5
     max_close_breaches: int = 2
+    # Range-mode box (user request 2026-09-17, JTO case): textbook ranges /
+    # consolidation boxes with INTERNAL swings are detected via touch
+    # clusters instead of requiring every non-first pivot to carry EH/EL
+    # (the strict model rejected JTO 4H 0.40–0.466 — internal swings broke
+    # the label chain: HH→EH→LH→HH / LL→HL→LL→HL→LL).
+    box_range_mode: bool = False
     selection_order: Tuple[str, ...] = ALL_TYPES
 
 
@@ -349,6 +355,119 @@ def _check_window(
     )
 
 
+def _check_box_range(
+    refs: Sequence[PivotRef],
+    atr14_series: List[Optional[float]],
+    cfg: DetectConfig,
+    close_by_bar: Optional[Dict[int, float]] = None,
+) -> Optional[Candidate]:
+    """Range-mode box (user request 2026-09-17, JTO case).
+
+    A consolidation range is defined by its boundary TOUCH CLUSTERS, not by
+    every pivot: swings strictly inside the range are allowed (the strict
+    model required every non-first pivot to be EH/EL and so rejected
+    textbook ranges whose internal swings interleave between the taps).
+
+    Rules:
+    - >=2 high touches within flat_tol_atr × ATR (side span ATR) of the
+      highest high; same for lows around the lowest low;
+    - the two sides' touch spans must overlap in time (both boundaries
+      tested during a common stretch — rejects break + dead-cat windows
+      where one side's taps are stale);
+    - closes between first and last pivot stay within the envelope
+      (close_breach_tol_atr / max_close_breaches, same as strict path).
+    """
+    highs = [r for r in refs if r.is_high]
+    lows = [r for r in refs if not r.is_high]
+    if len(highs) < 2 or len(lows) < 2:
+        return None
+
+    last_vote = refs[-1].bar_index
+    atr = None
+    for a in reversed(atr14_series[: last_vote + 1]):
+        if a is not None:
+            atr = a
+            break
+    if atr is None or atr <= 0:
+        return None
+
+    def span_atr(side_pivots):
+        vals = []
+        for p in (side_pivots[0], side_pivots[-1]):
+            if p.bar_index < len(atr14_series) and atr14_series[p.bar_index]:
+                vals.append(atr14_series[p.bar_index])
+        return max(vals) if vals else atr
+
+    u_ref = max(r.price for r in highs)
+    l_ref = min(r.price for r in lows)
+    u_tol = cfg.flat_tol_atr * span_atr(highs)
+    l_tol = cfg.flat_tol_atr * span_atr(lows)
+    u_touch = [r for r in highs if u_ref - r.price <= u_tol]
+    l_touch = [r for r in lows if r.price - l_ref <= l_tol]
+    if len(u_touch) < 2 or len(l_touch) < 2:
+        return None
+
+    # Both boundaries must have been tested during a common stretch.
+    if max(u_touch[0].abs_bar, l_touch[0].abs_bar) >= \
+            min(u_touch[-1].abs_bar, l_touch[-1].abs_bar):
+        return None
+
+    metrics: Dict[str, object] = {
+        "pivot_count": len(refs),
+        "touches": len(u_touch) + len(l_touch),
+        "upper_touches": len(u_touch),
+        "lower_touches": len(l_touch),
+        "span_bars": refs[-1].abs_bar - refs[0].abs_bar,
+        "upper_eq_err_atr": (max(r.price for r in u_touch)
+                             - min(r.price for r in u_touch)) / atr,
+        "lower_eq_err_atr": (max(r.price for r in l_touch)
+                             - min(r.price for r in l_touch)) / atr,
+        "upper_hits": len(highs),
+        "lower_hits": len(lows),
+        "hit_requirement": True,
+        "hit_boundary": "upper",
+        "convergence_rate": 0.0,
+        "width_reduction_pct": 0.0,
+        "mode": "range",
+    }
+
+    # Boundaries: strictly horizontal at the LAST touch of each side (the
+    # same price the breakout level and chart line use, per family rules).
+    u_level = u_touch[-1].price
+    l_level = l_touch[-1].price
+    metrics["upper_at_last_bar"] = u_level
+    metrics["lower_at_last_bar"] = l_level
+
+    # Interior close integrity against the range envelope.
+    if close_by_bar is not None:
+        b0, b1 = refs[0].abs_bar, refs[-1].abs_bar
+        tol = cfg.close_breach_tol_atr * atr
+        up_breaches = lo_breaches = 0
+        worst_breach = 0.0
+        for b in range(b0, b1 + 1):
+            cl = close_by_bar.get(b)
+            if cl is None:
+                continue
+            if cl > u_ref + tol:
+                up_breaches += 1
+                worst_breach = max(worst_breach, (cl - u_ref) / atr)
+            elif cl < l_ref - tol:
+                lo_breaches += 1
+                worst_breach = max(worst_breach, (l_ref - cl) / atr)
+        metrics["close_breaches_upper"] = up_breaches
+        metrics["close_breaches_lower"] = lo_breaches
+        metrics["worst_close_breach_atr"] = worst_breach
+        if max(up_breaches, lo_breaches) > cfg.max_close_breaches:
+            return None
+
+    upper = st.Line(slope=0.0, intercept=u_level, base_bar=0.0)
+    lower = st.Line(slope=0.0, intercept=l_level, base_bar=0.0)
+    return Candidate(
+        type=TYPE_BOX, refs=list(refs), upper=upper, lower=lower, atr=atr,
+        upper_class=st.FLAT, lower_class=st.FLAT, metrics=metrics,
+    )
+
+
 def detect_candidates(
     labeled: Sequence[Tuple[Pivot, Optional[PivotLabel]]],
     atr14_series: List[Optional[float]],
@@ -391,6 +510,8 @@ def detect_candidates(
         for k in range(min_k, top_k + 1):
             window = refs[-k:]
             cand = _check_window(spec, window, atr14_series, cfg, close_by_bar)
+            if cand is None and type_name == TYPE_BOX and cfg.box_range_mode:
+                cand = _check_box_range(window, atr14_series, cfg, close_by_bar)
             if cand is not None:
                 out.append(cand)
     return rank_candidates(out, cfg.selection_order)

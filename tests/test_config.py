@@ -23,6 +23,7 @@ def test_detection_config_defaults():
     assert det.flat_tol_atr == 1.0
     assert det.close_breach_tol_atr == 0.5
     assert det.max_close_breaches == 2
+    assert det.box_range_mode is False
     assert det.boundary_tol_atr == 1.0
     assert det.min_convergence_pct == 25.0
     assert len(det.selection_order) == 6

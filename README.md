@@ -56,6 +56,14 @@ compression + breakout alerts to the **Breakouts** Telegram channel
   touch spans overlapping in time, closes inside the envelope) — internal
   swings between the taps are allowed. The strict model (every non-first
   pivot EH/EL) rejected JTO 4H 0.40/0.466 despite 3 taps per side.
+- **Type priority (user rule 2026-09-19):** when more than one compression
+  is confirmed for the same coin+tf, only the highest-priority type
+  surfaces — triangles first (**ascending/descending**, then
+  **symmetrical**), **box** last (config `selection_order`). A
+  lower-priority compression message is HELD while a notified
+  higher-priority sibling is still active; it can surface later only if
+  that sibling ends first. Same-scan conflicts resolve in
+  `best_per_coin_tf` by the same order.
 - **Interior close integrity (user rule 2026-09-17):** candle closes
   between the window's first and last pivot must stay within the
   boundaries. A close beyond a boundary by more than

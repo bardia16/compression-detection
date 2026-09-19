@@ -7,8 +7,8 @@ import pytest
 
 from compression_detection import structure as st
 from compression_detection.detector import (
-    TYPE_BOX, TYPE_DESC_TRI, TYPE_FALLING_WEDGE, TYPE_SYM_TRI, TYPE_SPECS,
-    Candidate, PivotRef,
+    TYPE_ASC_TRI, TYPE_BOX, TYPE_DESC_TRI, TYPE_FALLING_WEDGE, TYPE_SYM_TRI,
+    TYPE_SPECS, Candidate, PivotRef,
 )
 from compression_detection.lifecycle import (
     STATE_BREAKOUT, STATE_COMPRESSING, STATE_CONFIRMED, STATE_DETECTED,
@@ -30,6 +30,8 @@ CFG = SimpleNamespace(
     catchup_max_candles=8,
     breakout_buffer_atr=0.0,
     notify_min_state="confirmed",
+    det=SimpleNamespace(selection_order=(
+        TYPE_ASC_TRI, TYPE_DESC_TRI, TYPE_SYM_TRI, TYPE_BOX)),
 )
 
 
@@ -458,17 +460,63 @@ def test_best_per_coin_tf_keeps_best_notify():
         ref(10, 100.0, "H"), ref(14, 90.0, "L"),
         ref(18, 97.0, "H", "LH"), ref(22, 94.0, "L", "HL"),
     ])
-    i1 = mk_instance(cand6, symbol="AAA")
-    i2 = mk_instance(sym, symbol="AAA")
+    i1 = mk_instance(cand6, symbol="AAA")          # box, 6 pivots
+    i2 = mk_instance(sym, symbol="AAA")            # triangle, 4 pivots
     i3 = mk_instance(sym, symbol="BBB")
     from compression_detection.lifecycle import Action
     acts = [Action("compression_notify", i1), Action("compression_notify", i2),
             Action("compression_notify", i3), Action("retract", i1)]
-    out = best_per_coin_tf(acts)
+    out = best_per_coin_tf(acts, CFG.det.selection_order)
     notifies = [a for a in out if a.kind == "compression_notify"]
     assert len(notifies) == 2                     # AAA best + BBB
-    assert i1 in [a.instance for a in notifies]   # 6 pivots beats 4
+    assert i2 in [a.instance for a in notifies]   # triangle beats bigger box
+    assert i1 not in [a.instance for a in notifies]
     assert any(a.kind == "retract" for a in out)
+
+
+def test_best_per_coin_tf_within_type_prefers_more_pivots():
+    refs6, cand6 = box_refs(n=6)
+    refs4, cand4 = box_refs(n=4)
+    from compression_detection.lifecycle import Action
+    i6 = mk_instance(cand6, symbol="AAA")
+    i4 = mk_instance(cand4, symbol="AAA")
+    out = best_per_coin_tf([Action("compression_notify", i4),
+                            Action("compression_notify", i6)],
+                           CFG.det.selection_order)
+    notifies = [a for a in out if a.kind == "compression_notify"]
+    assert len(notifies) == 1 and notifies[0].instance is i6
+
+
+def test_notify_holds_lower_priority_while_higher_surfaces():
+    from compression_detection.lifecycle import _maybe_notify
+    _, boxc = box_refs(n=4)
+    symc = mk_cand(TYPE_SYM_TRI, [
+        ref(10, 100.0, "H"), ref(14, 90.0, "L"),
+        ref(18, 97.0, "H", "LH"), ref(22, 94.0, "L", "HL"),
+    ])
+    box = mk_instance(boxc)
+    tri = mk_instance(symc)
+    box.state = STATE_CONFIRMED
+    tri.state = STATE_CONFIRMED
+
+    # higher type not yet notified → box may notify
+    kinds = [a.kind for a in _maybe_notify(box, 2000, CFG, [box, tri])]
+    assert kinds == ["compression_notify"]
+
+    # higher type notified & active → box is held
+    tri.notified["compression"] = True
+    assert _maybe_notify(box, 2000, CFG, [box, tri]) == []
+
+    # higher type ended → box may notify again
+    tri.state = STATE_INVALIDATED
+    assert [a.kind for a in _maybe_notify(box, 2000, CFG, [box, tri])] == \
+        ["compression_notify"]
+
+    # the higher type itself is never held
+    tri.state = STATE_CONFIRMED
+    tri.notified["compression"] = False
+    assert [a.kind for a in _maybe_notify(tri, 2000, CFG, [box, tri])] == \
+        ["compression_notify"]
 
 
 # ── serialization ──────────────────────────────────────────────────────

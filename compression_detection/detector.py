@@ -34,8 +34,10 @@ TYPE_SYM_TRI = "symmetrical_triangle"
 TYPE_FALLING_WEDGE = "falling_wedge"
 TYPE_RISING_WEDGE = "rising_wedge"
 
+# priority order (user rule 2026-09-19): when several compressions exist for
+# one coin+tf, triangles surface first (asc/desc, then symmetrical), then box
 ALL_TYPES = (
-    TYPE_BOX, TYPE_DESC_TRI, TYPE_ASC_TRI, TYPE_SYM_TRI,
+    TYPE_ASC_TRI, TYPE_DESC_TRI, TYPE_SYM_TRI, TYPE_BOX,
     # wedges disabled 2026-09-16 (buggy — will revisit)
     # TYPE_FALLING_WEDGE, TYPE_RISING_WEDGE,
 )

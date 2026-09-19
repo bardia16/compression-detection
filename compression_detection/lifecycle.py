@@ -337,14 +337,44 @@ def _apply_candidate(inst: Instance, cand: Candidate, now_s: int, cfg) -> List[A
     return actions
 
 
-def _maybe_notify(inst: Instance, now_s: int, cfg) -> List[Action]:
-    """Compression notification gate (once per instance)."""
+def _type_priority(type_name: str, order: Sequence[str]) -> int:
+    """Lower rank = higher priority for surfacing (user rule 2026-09-19).
+
+    Order comes from cfg.det.selection_order: triangles first
+    (ascending/descending, then symmetrical), then box.
+    """
+    try:
+        return list(order).index(type_name)
+    except ValueError:
+        return len(order)
+
+
+def _maybe_notify(inst: Instance, now_s: int, cfg,
+                  siblings: Optional[Sequence[Instance]] = None) -> List[Action]:
+    """Compression notification gate (once per instance).
+
+    Type-priority rule (user rule 2026-09-19): when more than one
+    compression is confirmed for the same coin+tf, only the
+    highest-priority type surfaces. A lower-priority notify is HELD while
+    an already-notified, still-active higher-priority sibling exists; it
+    retries on later scans and fires if that sibling ends first.
+    """
     if inst.notified.get("compression"):
         return []
     if inst.state in TERMINAL_STATES:
         return []
     if state_rank(inst.state) < state_rank(cfg.notify_min_state):
         return []
+    if siblings:
+        order = cfg.det.selection_order
+        mine = _type_priority(inst.type, order)
+        for o in siblings:
+            if o.id == inst.id or o.type == inst.type:
+                continue
+            if o.state in TERMINAL_STATES or not o.notified.get("compression"):
+                continue
+            if _type_priority(o.type, order) < mine:
+                return []
     return [Action("compression_notify", inst, {"state": inst.state, "level": inst.level})]
 
 
@@ -558,7 +588,7 @@ def update_for_scan(
             continue
         consumed.add(id(cand))
         actions.extend(_apply_candidate(inst, cand, now_s, cfg))
-        actions.extend(_maybe_notify(inst, now_s, cfg))
+        actions.extend(_maybe_notify(inst, now_s, cfg, symbol_tf))
 
     # 3) new instances from unmatched candidates (with already-broken guard)
     skipped_types: set = set()
@@ -608,7 +638,9 @@ def update_for_scan(
         instances[inst.id] = inst
         if inst.state in TERMINAL_STATES:
             continue
-        actions.extend(_maybe_notify(inst, now_s, cfg))
+        sibs = [i for i in instances.values()
+                if i.symbol == symbol and i.tf == tf]
+        actions.extend(_maybe_notify(inst, now_s, cfg, sibs))
 
     return actions
 
@@ -648,11 +680,13 @@ def _already_broken_side(cand: Candidate, closed_candles, tf_ms: int, cfg) -> Op
     return None
 
 
-def best_per_coin_tf(actions: List[Action]) -> List[Action]:
+def best_per_coin_tf(actions: List[Action], order: Sequence[str]) -> List[Action]:
     """Keep only the best compression_notify per (symbol, tf).
 
-    Ranking matches the detector: pivot_count desc, fit error asc.
-    Non-notify actions pass through untouched.
+    Ranking (user rule 2026-09-19): type priority first — triangles
+    (ascending/descending, then symmetrical) surface over boxes — then
+    pivot_count desc, then fit error asc. Non-notify actions pass through
+    untouched.
     """
     out: List[Action] = []
     best: Dict[tuple, Action] = {}
@@ -667,15 +701,16 @@ def best_per_coin_tf(actions: List[Action]) -> List[Action]:
             continue
         k = (inst.symbol, inst.tf)
         cur = best.get(k)
-        if cur is None or _notify_rank(a) < _notify_rank(cur):
+        if cur is None or _notify_rank(a, order) < _notify_rank(cur, order):
             best[k] = a
     out.extend(passthrough)
     out.extend(best.values())
     return out
 
 
-def _notify_rank(a: Action):
+def _notify_rank(a: Action, order: Sequence[str]) -> tuple:
     i = a.instance
     if i is None:
-        return (0, 0.0)
-    return (-i.pivot_count, i.metrics.get("fit_err_atr", 0.0))
+        return (len(order) + 1, 0, 0.0)
+    return (_type_priority(i.type, order), -i.pivot_count,
+            i.metrics.get("fit_err_atr", 0.0))

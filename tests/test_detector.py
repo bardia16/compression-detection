@@ -384,7 +384,8 @@ def test_rank_tiebreak_by_fit_error_then_order():
     b = mk_cand(TYPE_BOX, 4, 0.2)
     c = mk_cand(TYPE_BOX, 4, 0.1)
     ranked = rank_candidates([a, b, c], ALL_TYPES)
-    # same count: lower fit error wins; then selection order (box before asc)
+    # same count: lower fit error wins; then selection order (triangles
+    # before box — user rule 2026-09-19)
     assert ranked[0] is c
-    assert ranked[1] is b
-    assert ranked[2] is a
+    assert ranked[1] is a
+    assert ranked[2] is b

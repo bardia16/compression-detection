@@ -24,6 +24,10 @@ def test_detection_config_defaults():
     assert det.close_breach_tol_atr == 0.5
     assert det.max_close_breaches == 2
     assert det.box_range_mode is False
+    # type priority (user rule 2026-09-19): triangles first, box last
+    assert det.selection_order[:4] == ("ascending_triangle",
+                                       "descending_triangle",
+                                       "symmetrical_triangle", "box")
     assert det.boundary_tol_atr == 1.0
     assert det.min_convergence_pct == 25.0
     assert len(det.selection_order) == 6

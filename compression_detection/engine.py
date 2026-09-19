@@ -196,7 +196,8 @@ class Engine:
                         })
 
             if self.cfg.best_only_per_coin_tf:
-                raw_actions = best_per_coin_tf(raw_actions)
+                raw_actions = best_per_coin_tf(raw_actions,
+                                               self.cfg.det.selection_order)
 
             sends = await self._dispatch(raw_actions, ses, candles_by_key)
             actions = [{"kind": a.kind,

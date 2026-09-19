@@ -23,6 +23,9 @@ CFG = SimpleNamespace(
     catchup_max_candles=8,
     breakout_buffer_atr=0.0,
     notify_min_state="confirmed",
+    det=SimpleNamespace(selection_order=(
+        "ascending_triangle", "descending_triangle", "symmetrical_triangle",
+        "box")),
 )
 
 

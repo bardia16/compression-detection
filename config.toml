@@ -38,7 +38,7 @@ offset_s = 90                  # run 90s after each 15m boundary
 catchup_max_candles = 8        # per instance: cap catch-up checks after downtime
 
 [universe]
-min_volume_btc = 100           # same LCW fetch as daw/watchlist, independent project
+min_volume_btc = 200           # same LCW fetch as daw/watchlist, independent project (2026-09-19: 100→200)
 lcw_limit = 300
 
 [breakout]

@@ -341,7 +341,7 @@ def _type_priority(type_name: str, order: Sequence[str]) -> int:
     """Lower rank = higher priority for surfacing (user rule 2026-09-19).
 
     Order comes from cfg.det.selection_order: triangles first
-    (ascending/descending, then symmetrical), then box.
+    (ascending/descending), then box.
     """
     try:
         return list(order).index(type_name)
@@ -684,9 +684,8 @@ def best_per_coin_tf(actions: List[Action], order: Sequence[str]) -> List[Action
     """Keep only the best compression_notify per (symbol, tf).
 
     Ranking (user rule 2026-09-19): type priority first — triangles
-    (ascending/descending, then symmetrical) surface over boxes — then
-    pivot_count desc, then fit error asc. Non-notify actions pass through
-    untouched.
+    (ascending/descending) surface over boxes — then pivot_count desc,
+    then fit error asc. Non-notify actions pass through untouched.
     """
     out: List[Action] = []
     best: Dict[tuple, Action] = {}

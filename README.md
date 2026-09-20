@@ -1,10 +1,11 @@
 # compression-detection
 
-DAW-theory **compression structure detector** — finds Box / Descending /
-Ascending / Symmetrical Triangle / Falling & Rising Wedge formations on
-confirmed ATR-ZigZag pivots, tracks their lifecycle, and posts
+DAW-theory **compression structure detector** — finds **Box /
+Descending / Ascending Triangle** formations on confirmed ATR-ZigZag
+pivots, tracks their lifecycle, and posts
 compression + breakout alerts to the **Breakouts** Telegram channel
-(same bot as Trading-Alerts).
+(same bot as Trading-Alerts). Symmetrical triangles and wedges are
+disabled (user rules 2026-09-20 / 2026-09-16).
 
 ## What it does
 
@@ -58,12 +59,16 @@ compression + breakout alerts to the **Breakouts** Telegram channel
   pivot EH/EL) rejected JTO 4H 0.40/0.466 despite 3 taps per side.
 - **Type priority (user rule 2026-09-19):** when more than one compression
   is confirmed for the same coin+tf, only the highest-priority type
-  surfaces — triangles first (**ascending/descending**, then
-  **symmetrical**), **box** last (config `selection_order`). A
+  surfaces — triangles first (**ascending/descending**), **box** last
+  (config `selection_order`). A
   lower-priority compression message is HELD while a notified
   higher-priority sibling is still active; it can surface later only if
   that sibling ends first. Same-scan conflicts resolve in
   `best_per_coin_tf` by the same order.
+- **Detection scope (user rule 2026-09-20):** boxes + ascending/descending
+  triangles ONLY. Symmetrical triangles disabled alongside the wedges
+  (commented out of `TYPE_SPECS`/`ALL_TYPES`; re-enable only on user
+  request).
 - **Interior close integrity (user rule 2026-09-17):** candle closes
   between the window's first and last pivot must stay within the
   boundaries. A close beyond a boundary by more than

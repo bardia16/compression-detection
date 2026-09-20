@@ -1,12 +1,14 @@
 """Compression structure candidate detection over DAW-labeled pivot sequences.
 
-Six canonical types (spec §28):
+Active types (user rule 2026-09-20: boxes + ascending/descending triangles ONLY):
   box                  EH ↔ EL   upper flat,    lower flat        ≥4 pivots
   descending_triangle  LH ↔ EL   upper falling, lower flat        ≥4
   ascending_triangle   EH ↔ HL   upper flat,    lower rising      ≥4
-  symmetrical_triangle LH ↔ HL   upper falling, lower rising      ≥4  + converging
-  falling_wedge        LH ↔ LL   upper falling, lower falling     ≥5  + converging
-  rising_wedge         HH ↔ HL   upper rising,  lower rising      ≥5  + converging
+
+Disabled (kept for reference — do not re-enable without the user):
+  symmetrical_triangle LH ↔ HL   upper falling, lower rising      ≥4  (off 2026-09-20)
+  falling_wedge        LH ↔ LL   upper falling, lower falling     ≥5  (off 2026-09-16)
+  rising_wedge         HH ↔ HL   upper rising,  lower rising      ≥5  (off 2026-09-16)
 
 A candidate is valid only when the label gate AND the boundary geometry
 (flat/rising/falling in ATR units) AND (for converging types) the
@@ -35,9 +37,11 @@ TYPE_FALLING_WEDGE = "falling_wedge"
 TYPE_RISING_WEDGE = "rising_wedge"
 
 # priority order (user rule 2026-09-19): when several compressions exist for
-# one coin+tf, triangles surface first (asc/desc, then symmetrical), then box
+# one coin+tf, triangles (asc/desc) surface first, then box
 ALL_TYPES = (
-    TYPE_ASC_TRI, TYPE_DESC_TRI, TYPE_SYM_TRI, TYPE_BOX,
+    TYPE_ASC_TRI, TYPE_DESC_TRI, TYPE_BOX,
+    # symmetrical disabled 2026-09-20 (user rule: boxes + asc/desc only)
+    # TYPE_SYM_TRI,
     # wedges disabled 2026-09-16 (buggy — will revisit)
     # TYPE_FALLING_WEDGE, TYPE_RISING_WEDGE,
 )
@@ -71,11 +75,12 @@ TYPE_SPECS: Dict[str, TypeSpec] = {
         (PivotLabel.EH,), (PivotLabel.HL,),
         (st.FLAT,), (st.RISING,), False,
     ),
-    TYPE_SYM_TRI: TypeSpec(
-        TYPE_SYM_TRI,
-        (PivotLabel.LH,), (PivotLabel.HL,),
-        (st.FALLING,), (st.RISING,), True,
-    ),
+    # symmetrical disabled 2026-09-20 (user rule: boxes + asc/desc only)
+    # TYPE_SYM_TRI: TypeSpec(
+    #     TYPE_SYM_TRI,
+    #     (PivotLabel.LH,), (PivotLabel.HL,),
+    #     (st.FALLING,), (st.RISING,), True,
+    # ),
     # wedges disabled 2026-09-16 (buggy — will revisit)
     # TYPE_FALLING_WEDGE: TypeSpec(
     #     TYPE_FALLING_WEDGE,

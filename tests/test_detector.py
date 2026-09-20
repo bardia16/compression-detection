@@ -130,16 +130,9 @@ def test_ascending_triangle():
 
 
 def test_symmetrical_triangle_converging():
-    cands = detect([
-        ("H", 100.0, 10, None),
-        ("L", 90.0, 14, None),
-        ("H", 97.0, 18, "LH"),
-        ("L", 94.0, 22, "HL"),
-    ], last_bar=24)
-    assert TYPE_SYM_TRI in types_of(cands)
-    s = [c for c in cands if c.type == TYPE_SYM_TRI][0]
-    assert s.upper_class == st.FALLING and s.lower_class == st.RISING
-    assert s.metrics["convergence_rate"] == pytest.approx(7.0 / 8.5)
+    """DISABLED: symmetrical triangles removed from detection 2026-09-20
+    (user rule: boxes + ascending/descending triangles only)."""
+    pass
 
 
 def test_falling_wedge_converging():

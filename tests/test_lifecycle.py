@@ -20,7 +20,8 @@ from compression_detection.models import Candle
 
 TF_MS = 60_000
 MIN_PIVOTS = {
-    TYPE_BOX: 4, TYPE_DESC_TRI: 4, TYPE_SYM_TRI: 4, TYPE_FALLING_WEDGE: 5,
+    TYPE_BOX: 4, TYPE_ASC_TRI: 4, TYPE_DESC_TRI: 4, TYPE_SYM_TRI: 4,
+    TYPE_FALLING_WEDGE: 5,
 }
 CFG = SimpleNamespace(
     min_pivots=MIN_PIVOTS,
@@ -31,7 +32,7 @@ CFG = SimpleNamespace(
     breakout_buffer_atr=0.0,
     notify_min_state="confirmed",
     det=SimpleNamespace(selection_order=(
-        TYPE_ASC_TRI, TYPE_DESC_TRI, TYPE_SYM_TRI, TYPE_BOX)),
+        TYPE_ASC_TRI, TYPE_DESC_TRI, TYPE_BOX)),
 )
 
 
@@ -456,13 +457,13 @@ def test_new_structure_on_new_anchor_allowed():
 
 def test_best_per_coin_tf_keeps_best_notify():
     refs6, cand6 = box_refs(n=6)
-    sym = mk_cand(TYPE_SYM_TRI, [
-        ref(10, 100.0, "H"), ref(14, 90.0, "L"),
-        ref(18, 97.0, "H", "LH"), ref(22, 94.0, "L", "HL"),
+    asc = mk_cand(TYPE_ASC_TRI, [
+        ref(10, 90.0, "L"), ref(14, 100.0, "H"),
+        ref(18, 94.0, "L", "HL"), ref(22, 100.5, "H", "EH"),
     ])
     i1 = mk_instance(cand6, symbol="AAA")          # box, 6 pivots
-    i2 = mk_instance(sym, symbol="AAA")            # triangle, 4 pivots
-    i3 = mk_instance(sym, symbol="BBB")
+    i2 = mk_instance(asc, symbol="AAA")            # triangle, 4 pivots
+    i3 = mk_instance(asc, symbol="BBB")
     from compression_detection.lifecycle import Action
     acts = [Action("compression_notify", i1), Action("compression_notify", i2),
             Action("compression_notify", i3), Action("retract", i1)]
@@ -490,12 +491,12 @@ def test_best_per_coin_tf_within_type_prefers_more_pivots():
 def test_notify_holds_lower_priority_while_higher_surfaces():
     from compression_detection.lifecycle import _maybe_notify
     _, boxc = box_refs(n=4)
-    symc = mk_cand(TYPE_SYM_TRI, [
-        ref(10, 100.0, "H"), ref(14, 90.0, "L"),
-        ref(18, 97.0, "H", "LH"), ref(22, 94.0, "L", "HL"),
+    ascc = mk_cand(TYPE_ASC_TRI, [
+        ref(10, 90.0, "L"), ref(14, 100.0, "H"),
+        ref(18, 94.0, "L", "HL"), ref(22, 100.5, "H", "EH"),
     ])
     box = mk_instance(boxc)
-    tri = mk_instance(symc)
+    tri = mk_instance(ascc)
     box.state = STATE_CONFIRMED
     tri.state = STATE_CONFIRMED
 

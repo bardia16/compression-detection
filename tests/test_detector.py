@@ -107,10 +107,10 @@ def test_box_larger_window_ranked_first():
 
 def test_descending_triangle():
     cands = detect([
-        ("H", 100.0, 10, None),
-        ("L", 90.0, 14, None),
-        ("H", 96.0, 18, "LH"),
-        ("L", 90.2, 22, "EL"),
+        ("L", 90.0, 10, None),
+        ("H", 96.0, 14, "LH"),
+        ("L", 90.2, 18, "EL"),
+        ("H", 92.0, 22, "LH"),
     ], last_bar=24)
     assert TYPE_DESC_TRI in types_of(cands)
     d = [c for c in cands if c.type == TYPE_DESC_TRI][0]
@@ -119,14 +119,49 @@ def test_descending_triangle():
 
 def test_ascending_triangle():
     cands = detect([
-        ("L", 90.0, 10, None),
-        ("H", 100.0, 14, None),
-        ("L", 94.0, 18, "HL"),
-        ("H", 100.4, 22, "EH"),
+        ("H", 100.0, 10, None),
+        ("L", 93.0, 14, "HL"),
+        ("H", 100.4, 18, "EH"),
+        ("L", 97.0, 22, "HL"),
     ], last_bar=24)
     assert TYPE_ASC_TRI in types_of(cands)
     a = [c for c in cands if c.type == TYPE_ASC_TRI][0]
     assert a.upper_class == st.FLAT and a.lower_class == st.RISING
+
+
+def test_asc_rejects_lead_in_low():
+    """User rule 2026-09-20 (CUSDT): the pattern starts at the first EH
+    tap — a pre-pattern (lead-in) low must not anchor the rising side."""
+    cands = detect([
+        ("L", 90.0, 10, None),      # lead-in low before the EH tap
+        ("H", 100.0, 14, None),
+        ("L", 94.0, 18, "HL"),
+        ("H", 100.4, 22, "EH"),
+    ], last_bar=24)
+    assert TYPE_ASC_TRI not in types_of(cands)
+
+
+def test_asc_all_lows_count_no_first_exemption():
+    """Sloped side has no first-pivot exemption: every low must be HL."""
+    cands = detect([
+        ("H", 100.0, 10, None),
+        ("L", 89.0, 14, "EL"),      # first low not higher -> invalid
+        ("H", 100.4, 18, "EH"),
+        ("L", 95.0, 22, "HL"),
+    ], last_bar=24)
+    assert TYPE_ASC_TRI not in types_of(cands)
+
+
+def test_desc_rejects_lead_in_high():
+    """Mirror: descending triangles start at the first EL tap — a
+    pre-pattern high must not anchor the falling side."""
+    cands = detect([
+        ("H", 100.0, 10, None),     # lead-in high before the EL tap
+        ("L", 90.0, 14, None),
+        ("H", 96.0, 18, "LH"),
+        ("L", 90.2, 22, "EL"),
+    ], last_bar=24)
+    assert TYPE_DESC_TRI not in types_of(cands)
 
 
 def test_symmetrical_triangle_converging():
@@ -148,10 +183,10 @@ def test_rising_wedge_converging():
 # ── interior close integrity (2026-09-17, BTW case) ────────────────────
 
 ASC_ENTRIES = [
-    ("L", 90.0, 10, None),
-    ("H", 100.0, 30, None),
-    ("L", 94.0, 40, "HL"),
-    ("H", 100.5, 44, "EH"),
+    ("H", 100.0, 10, None),
+    ("L", 93.0, 30, "HL"),
+    ("H", 100.5, 34, "EH"),
+    ("L", 97.0, 44, "HL"),
 ]
 
 
@@ -166,8 +201,8 @@ def test_interior_close_breaches_reject_candidate():
 
 def test_interior_close_breaches_within_limit_accepted():
     """Up to 2 fit-noise breaches are tolerated; metrics expose counts."""
-    noisy = [(b, 91.5) for b in (30, 35)]
-    clean = [(b, 96.0) for b in range(11, 40) if b not in (30, 35)]
+    noisy = [(b, 91.5) for b in (32, 40)]
+    clean = [(b, 97.5) for b in range(11, 41) if b not in (32, 40)]
     cands = detect_with_candles(ASC_ENTRIES, 46, candles_for(noisy + clean))
     assert TYPE_ASC_TRI in types_of(cands)
     c = [x for x in cands if x.type == TYPE_ASC_TRI][0]

@@ -1,9 +1,15 @@
 """Compression structure candidate detection over DAW-labeled pivot sequences.
 
-Active types (user rule 2026-09-20: boxes + ascending/descending triangles ONLY):
+Active types (user rule 2026-09-20: boxes + asc/desc triangles ONLY):
   box                  EH ↔ EL   upper flat,    lower flat        ≥4 pivots
-  descending_triangle  LH ↔ EL   upper falling, lower flat        ≥4
-  ascending_triangle   EH ↔ HL   upper flat,    lower rising      ≥4
+  descending_triangle  LH ↔ EL   upper falling, lower flat        ≥4  starts at the first EL tap
+  ascending_triangle   EH ↔ HL   upper flat,    lower rising      ≥4  starts at the first EH tap
+
+Triangle anchoring (user rule 2026-09-20, CUSDT case): the flat side is
+determined FIRST; the pattern's pivots start at the first flat-side tap
+(asc: a high, desc: a low), and the sloped side's pivots ALL count — the
+first pivot after the first flat tap onward (no first-pivot exemption on
+the sloped side), so a pre-pattern pivot can never anchor a boundary line.
 
 Disabled (kept for reference — do not re-enable without the user):
   symmetrical_triangle LH ↔ HL   upper falling, lower rising      ≥4  (off 2026-09-20)
@@ -13,9 +19,9 @@ Disabled (kept for reference — do not re-enable without the user):
 A candidate is valid only when the label gate AND the boundary geometry
 (flat/rising/falling in ATR units) AND (for converging types) the
 multi-observation convergence check all pass — never labels alone
-(spec §4, §17, §29). The first pivot of each side is label-exempt
-(spec §5: initial reference pivots don't need literal labels when the
-history already establishes the boundary).
+(spec §4, §17, §29). Boxes keep the spec §5 first-pivot label exemption
+on both sides; triangles exempt only the flat side's first tap (user
+rule 2026-09-20 — see above).
 
 All candidates for all types/window sizes are returned; ranking is
 deterministic: (pivot_count desc, total fit error asc, selection order).
@@ -50,13 +56,21 @@ ALL_TYPES = (
 @dataclass(frozen=True)
 class TypeSpec:
     name: str
-    # allowed labels for NON-first pivots of each side
+    # allowed labels for pivots of each side
     upper_labels: Tuple[PivotLabel, ...]
     lower_labels: Tuple[PivotLabel, ...]
     # allowed slope classes for each boundary
     upper_slopes: Tuple[str, ...]
     lower_slopes: Tuple[str, ...]
     converging: bool
+    # user rule 2026-09-20 (CUSDT): triangles anchor at the flat side's
+    # first tap — the window must START on that side ("H"/"L"; None =
+    # either) and the sloped side has NO first-pivot label exemption (all
+    # its pivots count, starting from the first pivot after the first
+    # flat-side tap). Boxes keep both first-pivot exemptions.
+    lead_side: Optional[str] = None
+    exempt_first_upper: bool = True
+    exempt_first_lower: bool = True
 
 
 TYPE_SPECS: Dict[str, TypeSpec] = {
@@ -69,11 +83,13 @@ TYPE_SPECS: Dict[str, TypeSpec] = {
         TYPE_DESC_TRI,
         (PivotLabel.LH,), (PivotLabel.EL,),
         (st.FALLING,), (st.FLAT,), False,
+        lead_side="L", exempt_first_upper=False,
     ),
     TYPE_ASC_TRI: TypeSpec(
         TYPE_ASC_TRI,
         (PivotLabel.EH,), (PivotLabel.HL,),
         (st.FLAT,), (st.RISING,), False,
+        lead_side="H", exempt_first_lower=False,
     ),
     # symmetrical disabled 2026-09-20 (user rule: boxes + asc/desc only)
     # TYPE_SYM_TRI: TypeSpec(
@@ -199,20 +215,29 @@ def rank_candidates(cands: Sequence[Candidate], order: Sequence[str]) -> List[Ca
 def _label_ok(
     refs: Sequence[PivotRef], spec: TypeSpec
 ) -> bool:
-    """Label gate: every NON-first pivot of each side must carry one of the
-    spec's allowed labels; the first pivot of each side is exempt."""
+    """Label gate.  The first pivot of a side is exempt only when the spec
+    says so (user rule 2026-09-20: for triangles the SLOPED side counts
+    from the first pivot after the first flat-side tap — no exemption
+    there), and the window must START on the spec's lead side (asc: a
+    high, desc: a low) so a pre-pattern pivot never anchors a line."""
+    if spec.lead_side == "H" and not refs[0].is_high:
+        return False
+    if spec.lead_side == "L" and refs[0].is_high:
+        return False
     seen_high = False
     seen_low = False
     for r in refs:
         if r.is_high:
-            if not seen_high:
-                seen_high = True
+            first = not seen_high
+            seen_high = True
+            if first and spec.exempt_first_upper:
                 continue
             if r.label is None or PivotLabel(r.label) not in spec.upper_labels:
                 return False
         else:
-            if not seen_low:
-                seen_low = True
+            first = not seen_low
+            seen_low = True
+            if first and spec.exempt_first_lower:
                 continue
             if r.label is None or PivotLabel(r.label) not in spec.lower_labels:
                 return False

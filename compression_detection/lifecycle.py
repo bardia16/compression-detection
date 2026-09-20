@@ -164,6 +164,11 @@ class Instance:
     metrics: dict
     notified: dict = field(default_factory=lambda: {"compression": False, "breakout": False})
     msg_ids: List[int] = field(default_factory=list)
+    # DM mirror (user rule 2026-09-20: asc/desc triangle alerts also go to
+    # Bardia's DM) — ids of the mirrored messages; dm_msg_ids[0] is the
+    # mirrored compression message (reply target for heads-ups there)
+    dm_msg_ids: List[int] = field(default_factory=list)
+    probe_msg_id_dm: Optional[int] = None
     # probe bookkeeping (T−3:00 heads-up)
     probe_last_ms: int = 0      # candle open of last probe ATTEMPT
     probe_msg_id: Optional[int] = None
@@ -254,6 +259,8 @@ class Instance:
             "atr": self.atr, "upper_class": self.upper_class,
             "lower_class": self.lower_class, "metrics": self.metrics,
             "notified": dict(self.notified), "msg_ids": list(self.msg_ids),
+            "dm_msg_ids": list(self.dm_msg_ids),
+            "probe_msg_id_dm": self.probe_msg_id_dm,
             "probe_last_ms": self.probe_last_ms, "probe_msg_id": self.probe_msg_id,
             "probe_candle_ms": self.probe_candle_ms, "probe_side": self.probe_side,
             "events": self.events,
@@ -275,6 +282,8 @@ class Instance:
             notified={"compression": bool((d.get("notified") or {}).get("compression")),
                       "breakout": bool((d.get("notified") or {}).get("breakout"))},
             msg_ids=list(d.get("msg_ids") or []),
+            dm_msg_ids=list(d.get("dm_msg_ids") or []),
+            probe_msg_id_dm=d.get("probe_msg_id_dm"),
             probe_last_ms=d.get("probe_last_ms", 0),
             probe_msg_id=d.get("probe_msg_id"),
             probe_candle_ms=d.get("probe_candle_ms", 0),

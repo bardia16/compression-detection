@@ -121,3 +121,27 @@ def test_post_passes_reply_to_message_id(monkeypatch):
     captured.clear()
     asyncio.run(tg.post("hi"))                      # standalone: no reply key
     assert "reply_to_message_id" not in captured
+
+
+def test_post_chat_id_override(monkeypatch):
+    """DM mirror (user rule 2026-09-20): the same content can target another
+    chat (Bardia's DM) without touching the channel default."""
+    import asyncio
+    from compression_detection.notifier import Telegram
+
+    tg = Telegram("tok", "chan")
+    captured = {}
+
+    async def fake_api(method, chat_id=None, **params):
+        captured["method"] = method
+        captured["chat_id"] = chat_id
+        return {"ok": True, "result": {"message_id": 9}}
+
+    monkeypatch.setattr(tg, "_api", fake_api)
+    mid = asyncio.run(tg.post("hi", chat_id="999"))
+    assert mid == 9
+    assert captured["chat_id"] == "999"
+    asyncio.run(tg.post("hi"))                      # default: channel chat
+    assert captured["chat_id"] is None
+    assert asyncio.run(tg.delete(5, chat_id="999"))
+    assert captured["method"] == "deleteMessage"

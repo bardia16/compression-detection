@@ -528,10 +528,14 @@ def test_instance_roundtrip():
     inst.probe_msg_id = 42
     inst.probe_candle_ms = 31 * TF_MS
     inst.probe_side = "up"
+    inst.dm_msg_ids = [101]
+    inst.probe_msg_id_dm = 55
     d = inst.to_dict()
     inst2 = Instance.from_dict(d)
     assert inst2.id == inst.id
     assert inst2.pivot_tss == inst.pivot_tss
     assert inst2.upper_at(20) == pytest.approx(inst.upper_at(20))
     assert inst2.probe_msg_id == 42
+    assert inst2.dm_msg_ids == [101]
+    assert inst2.probe_msg_id_dm == 55
     assert inst2.to_dict() == d

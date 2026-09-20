@@ -44,6 +44,11 @@ disabled (user rules 2026-09-20 / 2026-09-16).
   confirmation message** — compression + its breakout read as one thread
   in the channel. If no compression message was ever sent for that
   structure, the breakout posts standalone.
+- **DM mirror (user rule 2026-09-20):** ascending/descending triangle
+  alerts are ALSO sent to Bardia's DM (`TELEGRAM_DM_CHAT_ID` in `.env`):
+  compression message, breakout heads-ups (reply-threaded onto the DM
+  compression message) and retracts. The channel is unchanged and boxes
+  are untouched (channel only). Empty `TELEGRAM_DM_CHAT_ID` = off.
 - **Charts (user rules 2026-09-16):** **triangles/wedges** draw the two
   extrapolated boundary lines, each starting at its own first pivot (no
   left overhang); the FLAT side of a triangle (desc base / asc top) is

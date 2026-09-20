@@ -54,6 +54,11 @@ CHART_RETRY_DELAY_S = 3.0      # one retry before the text-only fallback (chart
                                # service 503s transiently during scan bursts)
 UNIVERSE_AVAIL_TTL = 6 * 3600  # exchangeInfo cache
 
+# DM mirror (user rule 2026-09-20): ascending/descending triangle alerts are
+# ALSO sent to Bardia's DM, in addition to the channel. Chat id comes from
+# TELEGRAM_DM_CHAT_ID (.env); empty/unset = mirroring off (channel only).
+DM_MIRROR_TYPES = ("ascending_triangle", "descending_triangle")
+
 
 class Engine:
     def __init__(self, cfg: Config, dry_run: bool = False,
@@ -63,6 +68,7 @@ class Engine:
         self.audit = Audit(AUDIT_DIR)
         self.instances: Dict[str, Instance] = {}
         self.tg = tg
+        self.dm_chat = os.environ.get("TELEGRAM_DM_CHAT_ID", "").strip() or None
         self._available: Optional[set] = None
         self._available_ts = 0.0
         self._chart_sem = asyncio.Semaphore(2)
@@ -264,6 +270,10 @@ class Engine:
                 if mid is not None:
                     inst.notified["compression"] = True
                     inst.msg_ids.append(mid)
+                    # DM mirror (user rule 2026-09-20): triangles also to DM
+                    dmid = await self._dm_post(inst, kind, caption, img)
+                    if dmid is not None:
+                        inst.dm_msg_ids.append(dmid)
                 sends.append({"kind": kind, "id": inst.id, "msg_id": mid})
                 self.audit.write({"event": "post", "kind": kind, "id": inst.id,
                                   "msg_id": mid, "chart": img is not None})
@@ -312,6 +322,7 @@ class Engine:
                                   "reply_to": reply_to, "chart": img is not None})
 
             elif kind == "breakout_keep":
+                inst.probe_msg_id_dm = None   # mirrored heads-up is kept too
                 self.audit.write({"event": "breakout_confirmed", "id": inst.id,
                                   "side": a.detail.get("side"),
                                   "msg_id": a.detail.get("msg_id")})
@@ -323,6 +334,13 @@ class Engine:
                     ok = await self.tg.delete(mid, a.detail.get("reason", ""))
                     if mid in inst.msg_ids:
                         inst.msg_ids.remove(mid)
+                # mirrored heads-up (if any) is retracted with its channel twin
+                dmid = inst.probe_msg_id_dm
+                if dmid is not None:
+                    if not self.dry_run and self.tg is not None and self.dm_chat:
+                        await self.tg.delete(dmid, a.detail.get("reason", ""),
+                                             chat_id=self.dm_chat)
+                    inst.probe_msg_id_dm = None
                 self.audit.write({"event": "retract", "id": inst.id, "msg_id": mid,
                                   "reason": a.detail.get("reason"), "deleted": ok})
 
@@ -347,6 +365,30 @@ class Engine:
                                            inst.tf, lines, trend_lines)
             self._chart_last = time.time()
             return img
+
+    def _dm_mirror(self, inst: Instance) -> bool:
+        """True when this instance's alerts are also mirrored to the DM
+        (user rule 2026-09-20: ascending/descending triangles)."""
+        return bool(self.dm_chat) and inst.type in DM_MIRROR_TYPES
+
+    async def _dm_post(self, inst: Instance, kind: str, caption: str,
+                       img: Optional[bytes],
+                       reply_to_dm: Optional[int] = None) -> Optional[int]:
+        """Mirror one alert into the DM chat (chart included when fetched).
+        Returns the DM message id, or None when mirroring is off/failed."""
+        if not self._dm_mirror(inst) or self.tg is None or self.dry_run:
+            return None
+        dmid = None
+        if img is not None:
+            dmid = await self.tg.post_photo(caption, img,
+                                            reply_to_id=reply_to_dm,
+                                            chat_id=self.dm_chat)
+        if dmid is None:
+            dmid = await self.tg.post(caption, reply_to_id=reply_to_dm,
+                                      chat_id=self.dm_chat)
+        self.audit.write({"event": "dm_mirror", "kind": kind, "id": inst.id,
+                          "msg_id": dmid})
+        return dmid
 
     # ── probes ─────────────────────────────────────────────────────────
     async def probe_once(self, ses: aiohttp.ClientSession) -> int:
@@ -411,6 +453,12 @@ class Engine:
                 inst.probe_msg_id = mid
                 inst.probe_candle_ms = open_ms
                 inst.probe_side = side
+                # DM mirror (user rule 2026-09-20): mirrored heads-up threads
+                # onto the mirrored compression message in the DM
+                dm_reply = inst.dm_msg_ids[0] if inst.dm_msg_ids else None
+                dmid = await self._dm_post(inst, "probe", caption, img, dm_reply)
+                if dmid is not None:
+                    inst.probe_msg_id_dm = dmid
                 posted += 1
                 self.audit.write({"event": "probe_post", "id": inst.id,
                                   "side": side, "level": level, "msg_id": mid,
@@ -462,8 +510,9 @@ class Engine:
             except NotImplementedError:
                 pass
 
-        log.info("compression-detection engine starting (tfs=%s, notify=%s)",
-                 self.cfg.timeframes, self.cfg.notif_enabled)
+        log.info("compression-detection engine starting (tfs=%s, notify=%s, "
+                 "dm_mirror=%s)",
+                 self.cfg.timeframes, self.cfg.notif_enabled, self.dm_chat or "-")
         async with aiohttp.ClientSession() as ses:
             await self.scan_once()
             scan_task = asyncio.create_task(self._scan_loop(stop))

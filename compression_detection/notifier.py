@@ -104,29 +104,31 @@ class Telegram:
             self._ses = aiohttp.ClientSession()
         return self._ses
 
-    async def _api(self, method: str, **params) -> dict:
+    async def _api(self, method: str, chat_id: Optional[str] = None, **params) -> dict:
         ses = await self._session()
-        params["chat_id"] = self.chat_id
+        params["chat_id"] = chat_id or self.chat_id
         async with ses.post(
             f"https://api.telegram.org/bot{self.token}/{method}", json=params,
         ) as r:
             return await r.json(content_type=None)
 
-    async def post(self, text: str, reply_to_id: Optional[int] = None) -> Optional[int]:
+    async def post(self, text: str, reply_to_id: Optional[int] = None,
+                   chat_id: Optional[str] = None) -> Optional[int]:
         params = {"text": text, "parse_mode": "HTML"}
         if reply_to_id:
             params["reply_to_message_id"] = reply_to_id
-        d = await self._api("sendMessage", **params)
+        d = await self._api("sendMessage", chat_id=chat_id, **params)
         if d.get("ok"):
             return d["result"]["message_id"]
         log.warning("tg post failed: %s", d)
         return None
 
     async def post_photo(self, caption: str, image: bytes,
-                         reply_to_id: Optional[int] = None) -> Optional[int]:
+                         reply_to_id: Optional[int] = None,
+                         chat_id: Optional[str] = None) -> Optional[int]:
         ses = await self._session()
         form = aiohttp.FormData()
-        form.add_field("chat_id", str(self.chat_id))
+        form.add_field("chat_id", str(chat_id or self.chat_id))
         form.add_field("caption", caption)
         form.add_field("parse_mode", "HTML")
         if reply_to_id:
@@ -146,8 +148,9 @@ class Telegram:
         log.warning("tg post_photo failed: %s", d)
         return None
 
-    async def delete(self, msg_id: int, why: str = "") -> bool:
-        d = await self._api("deleteMessage", message_id=msg_id)
+    async def delete(self, msg_id: int, why: str = "",
+                     chat_id: Optional[str] = None) -> bool:
+        d = await self._api("deleteMessage", chat_id=chat_id, message_id=msg_id)
         if d.get("ok"):
             log.info("tg deleted msg %s (%s)", msg_id, why)
             return True

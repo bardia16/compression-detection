@@ -64,8 +64,10 @@ def fetch_coins(api_key: str, limit: int = 300, min_volume_btc: float = 100.0,
                 btc_price: Optional[float] = None) -> List[dict]:
     """LCW coins sorted by 24h volume, filtered (same pattern as the
     watchlist/daw projects): dedupe by symbol keeping the highest volume,
-    drop stablecoins/asset-backed tokens and BTC, then apply the
-    min_volume_btc threshold. Raises on HTTP errors."""
+    drop stablecoins/asset-backed tokens, then apply the min_volume_btc
+    threshold. BTC is INCLUDED (user rule 2026-09-21: BTC compressions are
+    wanted here — the watchlist/daw BTC-drop does not apply). Raises on
+    HTTP errors."""
     headers = {"content-type": "application/json", "x-api-key": api_key}
     payload = {
         "currency": "USD", "sort": "volume", "order": "descending",
@@ -83,8 +85,6 @@ def fetch_coins(api_key: str, limit: int = 300, min_volume_btc: float = 100.0,
             continue
         categories = {c.lower() for c in item.get("categories", []) or []}
         if categories & STABLECATEGORIES:
-            continue
-        if code == "BTC":
             continue
         vol = item.get("volume", 0) or 0
         if code not in seen or vol > seen[code]["volume_24h"]:

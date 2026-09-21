@@ -41,8 +41,9 @@ def test_fetch_coins_filters(monkeypatch):
     ]
     monkeypatch.setattr(u.requests, "post", lambda *a, **k: FakeResp(data))
     coins = u.fetch_coins("key", limit=300, min_volume_btc=100, btc_price=2.0)
-    # BTC dropped, stablecoin dropped, dup keeps the higher volume, threshold=200
-    assert [c["symbol"] for c in coins] == ["ADA"]
+    # BTC kept (user rule 2026-09-21), stablecoin dropped, dup keeps the
+    # higher volume, threshold=200
+    assert [c["symbol"] for c in coins] == ["BTC", "ADA"]
 
 
 def test_get_universe_pairs(monkeypatch):

@@ -38,8 +38,8 @@ from .detector import detect_candidates
 from .dow import label_all_pivots
 from .fetcher import TF_MS, fetch_klines, fetch_last_price
 from .lifecycle import (
-    ACTIVE_STATES, TERMINAL_STATES, Instance, alert_level_for, best_per_coin_tf,
-    update_for_scan,
+    ACTIVE_STATES, TERMINAL_STATES, Action, Instance, alert_level_for,
+    best_per_coin_tf, retire_out_of_universe, update_for_scan,
 )
 from .report import build_summary, format_summary_text, write_report
 from .timing import next_scan_ms, probe_due
@@ -179,6 +179,26 @@ class Engine:
             raw_actions: List = []
             detections: List[dict] = []
             candles_by_key: Dict[tuple, list] = {}
+
+            # Out-of-universe TTL (user rule 2026-09-23): active instances of
+            # coins absent from the universe retire after
+            # cfg.out_of_universe_ttl_s, with their pending breakout heads-up
+            # retracted (the close verdict can never run for an unscanned
+            # coin). The timer clears whenever the coin is back in universe.
+            if not symbol_filter:
+                universe_syms = {p.split("/")[0] + "USDT" for p in pairs}
+                for inst in retire_out_of_universe(instances_src, universe_syms,
+                                                   now_s, self.cfg.out_of_universe_ttl_s):
+                    if inst.probe_msg_id is not None:
+                        raw_actions.append(Action("retract", inst, {
+                            "msg_id": inst.probe_msg_id,
+                            "reason": "coin left the universe — structure retired",
+                        }))
+                        inst.probe_msg_id = None
+                        inst.probe_candle_ms = 0
+                        inst.probe_side = ""
+                    raw_actions.append(Action("invalidate", inst,
+                                              {"reason": "out_of_universe"}))
             for pair, res in zip(pairs, results):
                 # store the full Binance symbol (ORCAUSDT) — messages, charts,
                 # probe fetches and ticker calls all need it (bare ORCA broke

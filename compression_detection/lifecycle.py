@@ -175,6 +175,11 @@ class Instance:
     probe_candle_ms: int = 0    # candle open of the POSTED message
     probe_side: str = ""        # "up" | "down"
     events: List[dict] = field(default_factory=list)
+    # Out-of-universe TTL (user rule 2026-09-23, CC case): set on the first
+    # scan where the coin is absent from the scan universe, cleared the
+    # moment it returns. After `out_of_universe_ttl_s` of absence the engine
+    # retires the instance (see retire_out_of_universe).
+    out_of_universe_since: Optional[int] = None
 
     # ── helpers ────────────────────────────────────────────────────────
     @property
@@ -264,6 +269,7 @@ class Instance:
             "probe_last_ms": self.probe_last_ms, "probe_msg_id": self.probe_msg_id,
             "probe_candle_ms": self.probe_candle_ms, "probe_side": self.probe_side,
             "events": self.events,
+            "out_of_universe_since": self.out_of_universe_since,
         }
 
     @classmethod
@@ -289,6 +295,7 @@ class Instance:
             probe_candle_ms=d.get("probe_candle_ms", 0),
             probe_side=d.get("probe_side", ""),
             events=list(d.get("events") or []),
+            out_of_universe_since=d.get("out_of_universe_since"),
         )
 
 
@@ -652,6 +659,36 @@ def update_for_scan(
         actions.extend(_maybe_notify(inst, now_s, cfg, sibs))
 
     return actions
+
+
+def retire_out_of_universe(
+    instances: Dict[str, Instance],
+    universe_symbols: set,
+    now_s: int,
+    ttl_s: int,
+) -> List[Instance]:
+    """Out-of-universe TTL (user rule 2026-09-23, CC case): a coin that drops
+    out of the scan universe keeps its ACTIVE instances for `ttl_s` seconds
+    (grace period — if the coin returns, its timer clears and normal tracking
+    resumes). Still absent after the TTL → the instance retires silently
+    (STATE_INVALIDATED, event reason='out_of_universe'); the engine then also
+    retracts any pending breakout heads-up, since the close verdict can never
+    run for an unscanned coin. Terminal instances are untouched."""
+    retired: List[Instance] = []
+    for inst in instances.values():
+        if inst.state not in ACTIVE_STATES:
+            continue
+        if inst.symbol in universe_symbols:
+            inst.out_of_universe_since = None
+            continue
+        if not inst.out_of_universe_since:
+            inst.out_of_universe_since = now_s
+            continue
+        if now_s - inst.out_of_universe_since >= ttl_s:
+            inst.state = STATE_INVALIDATED
+            inst.add_event("invalidated", now_s, reason="out_of_universe")
+            retired.append(inst)
+    return retired
 
 
 def _already_broken_side(cand: Candidate, closed_candles, tf_ms: int, cfg) -> Optional[str]:

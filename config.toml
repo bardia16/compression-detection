@@ -38,6 +38,7 @@ rising_wedge = 5
 [scan]
 offset_s = 90                  # run 90s after each 15m boundary
 catchup_max_candles = 8        # per instance: cap catch-up checks after downtime
+out_of_universe_ttl_s = 28800  # coin leaves universe: keep active instances 8h, then retire (+retract heads-up)
 
 [universe]
 min_volume_btc = 200           # same LCW fetch as daw/watchlist, independent project (2026-09-19: 100→200)

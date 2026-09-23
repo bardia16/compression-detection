@@ -23,6 +23,7 @@ class Config:
     det: DetectConfig
     scan_offset_s: int
     catchup_max_candles: int
+    out_of_universe_ttl_s: int
     min_volume_btc: float
     lcw_limit: int
     probe_warn_s: int
@@ -98,6 +99,7 @@ class Config:
             det=det,
             scan_offset_s=int(scan["offset_s"]),
             catchup_max_candles=int(scan["catchup_max_candles"]),
+            out_of_universe_ttl_s=int(scan.get("out_of_universe_ttl_s", 28800)),
             min_volume_btc=float(univ["min_volume_btc"]),
             lcw_limit=int(univ["lcw_limit"]),
             probe_warn_s=int(brk["probe_warn_s"]),

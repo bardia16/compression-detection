@@ -13,8 +13,8 @@ from compression_detection.detector import (
 from compression_detection.lifecycle import (
     STATE_BREAKOUT, STATE_COMPRESSING, STATE_CONFIRMED, STATE_DETECTED,
     STATE_INVALIDATED, Instance, best_per_coin_tf, create_instance,
-    evaluate_closed_candles, find_continuation, level_for, state_for_level,
-    update_for_scan,
+    evaluate_closed_candles, find_continuation, level_for,
+    retire_out_of_universe, state_for_level, update_for_scan,
 )
 from compression_detection.models import Candle
 
@@ -539,3 +539,41 @@ def test_instance_roundtrip():
     assert inst2.dm_msg_ids == [101]
     assert inst2.probe_msg_id_dm == 55
     assert inst2.to_dict() == d
+
+
+# ── out-of-universe TTL (user rule 2026-09-23, CC case) ────────────────
+
+def test_out_of_universe_ttl_retires_after_grace():
+    refs, cand = box_refs(n=5)
+    inst = mk_instance(cand, symbol="AAA", tf="15m", now_s=1000)
+    instances = {inst.id: inst}
+    # first absent scan: timer starts, instance stays active
+    out = retire_out_of_universe(instances, {"BBBUSDT"}, 10_000, 8 * 3600)
+    assert out == [] and inst.state in (STATE_DETECTED, STATE_CONFIRMED, STATE_COMPRESSING)
+    assert inst.out_of_universe_since == 10_000
+    # still inside the grace period
+    out = retire_out_of_universe(instances, {"BBBUSDT"}, 10_000 + 8 * 3600 - 1, 8 * 3600)
+    assert out == [] and inst.state != STATE_INVALIDATED
+    # TTL elapsed -> retired
+    out = retire_out_of_universe(instances, {"BBBUSDT"}, 10_000 + 8 * 3600, 8 * 3600)
+    assert out == [inst] and inst.state == STATE_INVALIDATED
+
+
+def test_out_of_universe_timer_clears_when_coin_returns():
+    refs, cand = box_refs(n=5)
+    inst = mk_instance(cand, symbol="AAA", tf="15m", now_s=1000)
+    instances = {inst.id: inst}
+    retire_out_of_universe(instances, set(), 10_000, 8 * 3600)
+    assert inst.out_of_universe_since == 10_000
+    retire_out_of_universe(instances, {"AAA"}, 10_600, 8 * 3600)
+    assert inst.out_of_universe_since is None
+    assert inst.state != STATE_INVALIDATED
+
+
+def test_out_of_universe_terminal_instances_untouched():
+    refs, cand = box_refs(n=5)
+    inst = mk_instance(cand, symbol="AAA", tf="15m", now_s=1000)
+    inst.state = STATE_INVALIDATED
+    instances = {inst.id: inst}
+    out = retire_out_of_universe(instances, set(), 10_000, 8 * 3600)
+    assert out == [] and inst.out_of_universe_since is None

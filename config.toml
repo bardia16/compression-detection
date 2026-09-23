@@ -23,6 +23,8 @@ min_boundary_hits = 2          # global rule: ≥2 confirmed pivot hits on one b
 close_breach_tol_atr = 0.5     # close beyond boundary by > this × ATR = a breach
 max_close_breaches = 2         # >2 interior close breaches on a side → candidate rejected
 box_range_mode = false         # range-mode box: touch clusters + internal swings allowed
+skip_max_dropped = 2           # middle-pivot skip: drop up to N interior pivots, re-check triangles
+skip_max_window = 8            # middle-pivot skip: suffix-window reach (pivots)
 selection_order = ["ascending_triangle", "descending_triangle", "box"]
 
 [detection.min_pivots]

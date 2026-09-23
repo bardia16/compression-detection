@@ -16,6 +16,7 @@ from compression_detection.detector import (
     Candidate,
     DetectConfig,
     PivotRef,
+    _skip_variants,
     detect_candidates,
     rank_candidates,
 )
@@ -439,3 +440,87 @@ def test_rank_tiebreak_by_fit_error_then_order():
     assert ranked[0] is c
     assert ranked[1] is a
     assert ranked[2] is b
+
+
+# ── middle-pivot skip (user rule 2026-09-23, AVA case) ─────────────────
+
+AVA_LIKE_ENTRIES = [
+    ("L", 100.0, 10, None),      # anchor low
+    ("H", 106.0, 14, "HH"),      # middle high — dropped by the skip search
+    ("L", 103.0, 18, "HL"),      # middle low  — dropped by the skip search
+    ("H", 112.0, 22, None),      # first flat-top tap
+    ("L", 103.5, 26, "EL"),      # EQUAL middle low — kills the strict pass
+    ("H", 112.5, 30, "EH"),      # second flat-top tap
+    ("L", 108.0, 34, "HL"),      # final higher low — confirms
+]
+
+
+def test_skip_detects_middle_equal_low():
+    """AVA case: the low between the flat-top taps is EQUAL (EL) so the
+    strict [low, high, HL, EH, HL] pass rejects it; dropping the two middle
+    pivots and re-labeling the survivors against their new neighbours finds
+    the pattern."""
+    strict = detect(AVA_LIKE_ENTRIES, last_bar=36, skip_max_dropped=0)
+    assert TYPE_ASC_TRI not in types_of(strict)
+    cands = detect(AVA_LIKE_ENTRIES, last_bar=36)
+    asc = [c for c in cands if c.type == TYPE_ASC_TRI]
+    assert len(asc) == 1
+    assert [r.price for r in asc[0].refs] == [100.0, 112.0, 103.5, 112.5, 108.0]
+    assert asc[0].pivot_count == 5
+    assert asc[0].upper_class == st.FLAT and asc[0].lower_class == st.RISING
+
+
+def test_skip_variants_alternate_keep_anchors_dedupe():
+    """Reductions must keep the window's first & last pivot, keep the
+    sequence strictly alternating (zigzag invariant), and never repeat the
+    same pivot set."""
+    refs = [
+        PivotRef(ts=i * TF_MS, bar_index=i, abs_bar=i, price=100.0 + i,
+                 is_high=(i % 2 == 1), label=None)
+        for i in range(9)
+    ]
+    variants = list(_skip_variants(refs, min_k=5, max_window=8, max_drop=2))
+    assert variants, "a 9-pivot sequence must yield reductions"
+    for v in variants:
+        assert len(v) >= 5
+        assert v[-1].ts == refs[-1].ts, "window end anchor must be kept"
+        assert all(v[i].is_high != v[i - 1].is_high
+                   for i in range(1, len(v))), "reduction must alternate"
+    sigs = [tuple(r.ts for r in v) for v in variants]
+    assert len(sigs) == len(set(sigs))
+
+
+def test_skip_short_history_identical():
+    """With 5 pivots nothing can be reduced (needs K >= 6) — output is
+    identical to the strict pass."""
+    entries = [
+        ("L", 90.0, 10, None),
+        ("H", 100.0, 14, None),
+        ("L", 93.0, 18, "HL"),
+        ("H", 100.4, 22, "EH"),
+        ("L", 96.0, 26, "HL"),
+    ]
+    on = detect(entries, last_bar=28)
+    off = detect(entries, last_bar=28, skip_max_dropped=0)
+    sigs = lambda cs: sorted(tuple((r.ts, r.price) for r in c.refs) for c in cs)
+    assert sigs(on) == sigs(off)
+
+
+def test_skip_never_duplicates_and_keeps_strict():
+    """Strict candidates always survive; the skip search only ADDS windows —
+    never duplicates one already present."""
+    entries = [
+        ("L", 90.0, 10, None),
+        ("H", 100.0, 14, None),
+        ("L", 93.0, 18, "HL"),
+        ("H", 100.4, 22, "EH"),
+        ("L", 96.0, 26, "HL"),
+        ("H", 100.5, 30, "EH"),
+        ("L", 98.5, 34, "HL"),
+    ]
+    on = detect(entries, last_bar=36)
+    off = detect(entries, last_bar=36, skip_max_dropped=0)
+    on_sigs = [tuple((r.ts, r.price) for r in c.refs) for c in on]
+    off_sigs = {tuple((r.ts, r.price) for r in c.refs) for c in off}
+    assert len(on_sigs) == len(set(on_sigs))
+    assert off_sigs <= set(on_sigs)

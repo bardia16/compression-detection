@@ -62,6 +62,18 @@ disabled (user rules 2026-09-20 / 2026-09-16).
   touch spans overlapping in time, closes inside the envelope) — internal
   swings between the taps are allowed. The strict model (every non-first
   pivot EH/EL) rejected JTO 4H 0.40/0.466 despite 3 taps per side.
+- **Middle-pivot skip (user rule 2026-09-23, AVA case):** triangle patterns
+  are additionally checked on REDUCED windows — from each suffix window
+  (reach `skip_max_window` = 8 pivots) up to `skip_max_dropped` = 2
+  interior pivots (the middle lows/highs of `low, high, low, high`) are
+  removed, the survivors re-labeled against their new same-side
+  neighbours, and the standard gates re-run. Anchors (window's first &
+  last pivot) always stay, reductions must still alternate sides (zigzag
+  invariant), and results are deduped against the strict pass — a pure
+  ADD: strict candidates are never altered. Catches patterns whose middle
+  retest is EQUAL (EL/EH) instead of strictly higher/lower — e.g. AVA 15m
+  `0.2547 → 0.2724 → 0.2607 → 0.2721 → 0.2665` (the `0.2607` EL middle
+  low fails the strict pass; dropping two middle pivots finds it).
 - **Type priority (user rule 2026-09-19):** when more than one compression
   is confirmed for the same coin+tf, only the highest-priority type
   surfaces — triangles first (**ascending/descending**), **box** last

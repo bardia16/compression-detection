@@ -33,11 +33,12 @@ deterministic: (pivot_count desc, total fit error asc, selection order).
 """
 from __future__ import annotations
 
+import itertools
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from . import structure as st
-from .dow import PivotLabel
+from .dow import PivotLabel, label_pivot
 from .models import Pivot
 
 TYPE_BOX = "box"
@@ -142,6 +143,16 @@ class DetectConfig:
     # the label chain: HH→EH→LH→HH / LL→HL→LL→HL→LL).
     box_range_mode: bool = False
     selection_order: Tuple[str, ...] = ALL_TYPES
+    # Middle-pivot skip search (user rule 2026-09-23, AVA case): triangle
+    # patterns are additionally checked on REDUCED windows where up to
+    # `skip_max_dropped` interior pivots of a suffix window (the "middle"
+    # lows/highs) are removed and the remaining pivots re-labeled against
+    # their new same-side neighbours — "forgiving middle pivots". Anchors
+    # (first & last pivot of a window) are always kept, the reduced
+    # sequence must still alternate sides, and the standard gates still
+    # apply. 0 disables the search.
+    skip_max_dropped: int = 2
+    skip_max_window: int = 8
 
 
 @dataclass(frozen=True)
@@ -506,6 +517,71 @@ def _check_box_range(
     )
 
 
+def _skip_variants(
+    refs: Sequence[PivotRef],
+    min_k: int,
+    max_window: int,
+    max_drop: int,
+):
+    """Reduced pivot sequences for the middle-pivot skip search (user rule
+    2026-09-23): for every suffix window of K pivots, KEEP the window's first
+    and last pivot, drop up to `max_drop` of the INTERIOR pivots (the
+    middle low and highs of 'low, high, low, high'), and yield the result
+    when it has >= min_k pivots and still strictly alternates sides (the
+    zigzag invariant — reductions may never place two lows or two highs
+    adjacent). Duplicate reductions (same pivot set via different K) are
+    yielded once per call via the `seen` set below.
+    """
+    seen = set()
+    for k in range(min_k + 1, min(max_window, len(refs)) + 1):
+        win = refs[-k:]
+        interiors = list(range(1, k - 1))
+        for m in range(1, max_drop + 1):
+            for drop in itertools.combinations(interiors, m):
+                keep = [win[i] for i in range(k) if i not in drop]
+                if len(keep) < min_k:
+                    continue
+                if any(keep[i].is_high == keep[i - 1].is_high
+                       for i in range(1, len(keep))):
+                    continue
+                sig = tuple(r.ts for r in keep)
+                if sig in seen:
+                    continue
+                seen.add(sig)
+                yield keep
+
+
+def _relabel_refs(
+    refs: Sequence[PivotRef],
+    atr14_series: List[Optional[float]],
+) -> List[PivotRef]:
+    """Recompute the HH/LH/EH/HL/EL/LL labels of a reduced pivot sequence
+    against its OWN same-side neighbours (middle-pivot skip windows, user
+    rule 2026-09-23). The equality threshold uses the max of the two
+    pivots' ATR14 readings — same rule as the full-sequence labeling.
+    """
+    out: List[PivotRef] = []
+    last_high: Optional[PivotRef] = None
+    last_low: Optional[PivotRef] = None
+    for r in refs:
+        prev = last_high if r.is_high else last_low
+        a1 = atr14_series[r.bar_index] if r.bar_index < len(atr14_series) else None
+        a0 = None
+        if prev is not None and prev.bar_index < len(atr14_series):
+            a0 = atr14_series[prev.bar_index]
+        lbl = label_pivot(r, prev, a1, a0)
+        if r.is_high:
+            last_high = r
+        else:
+            last_low = r
+        out.append(PivotRef(
+            ts=r.ts, bar_index=r.bar_index, abs_bar=r.abs_bar,
+            price=r.price, is_high=r.is_high,
+            label=(lbl.value if lbl is not None else None),
+        ))
+    return out
+
+
 def detect_candidates(
     labeled: Sequence[Tuple[Pivot, Optional[PivotLabel]]],
     atr14_series: List[Optional[float]],
@@ -552,4 +628,26 @@ def detect_candidates(
                 cand = _check_box_range(window, atr14_series, cfg, close_by_bar)
             if cand is not None:
                 out.append(cand)
+
+    # Middle-pivot skip search (user rule 2026-09-23): re-check the TRIANGLE
+    # patterns on reduced windows — drop up to cfg.skip_max_dropped interior
+    # pivots, re-label the survivors against their new same-side neighbours,
+    # then the standard gates. The strict pass above is untouched and
+    # duplicates against it (or between reductions) are skipped.
+    if cfg.skip_max_dropped > 0:
+        seen = {tuple((r.ts, r.price) for r in c.refs) for c in out}
+        for type_name in (TYPE_ASC_TRI, TYPE_DESC_TRI):
+            spec = TYPE_SPECS[type_name]
+            min_k = cfg.min_pivots[type_name]
+            for keep in _skip_variants(refs, min_k, cfg.skip_max_window,
+                                       cfg.skip_max_dropped):
+                variant = _relabel_refs(keep, atr14_series)
+                sig = tuple((r.ts, r.price) for r in variant)
+                if sig in seen:
+                    continue
+                cand = _check_window(spec, variant, atr14_series, cfg,
+                                     close_by_bar)
+                if cand is not None:
+                    seen.add(sig)
+                    out.append(cand)
     return rank_candidates(out, cfg.selection_order)

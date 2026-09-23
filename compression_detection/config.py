@@ -75,6 +75,8 @@ class Config:
             max_close_breaches=int(det_raw.get("max_close_breaches", 2)),
             box_range_mode=bool(det_raw.get("box_range_mode", False)),
             selection_order=tuple(det_raw.get("selection_order") or ALL_TYPES),
+            skip_max_dropped=int(det_raw.get("skip_max_dropped", 2)),
+            skip_max_window=int(det_raw.get("skip_max_window", 8)),
         )
 
         proj = raw["project"]

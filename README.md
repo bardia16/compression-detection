@@ -74,15 +74,15 @@ disabled (user rules 2026-09-20 / 2026-09-16).
   triangles ONLY. Symmetrical triangles disabled alongside the wedges
   (commented out of `TYPE_SPECS`/`ALL_TYPES`; re-enable only on user
   request).
-- **Triangle anchoring (user rule 2026-09-20, CUSDT case):** for
-  ascending/descending triangles the FLAT side is determined first and
-  the window STARTS at the flat side's first tap (asc: a high, desc: a
-  low) — the higher lows (asc) / lower highs (desc) count from the first
-  pivot after that first flat tap, so a pre-pattern pivot can never
-  anchor a boundary line. Ascending: every low must be HL (no first-low
-  exemption); descending: every high must be LH (no first-high
-  exemption); the flat side's first tap stays label-exempt. Boxes keep
-  both first-pivot exemptions.
+- **Triangle pattern (user rule 2026-09-23, supersedes the 2026-09-20
+  anchor rule):** LONG (ascending) = `[low, high, HL, EH, HL]` — a low, a
+  high (first flat-top tap), a higher low, an equal high (second tap), a
+  higher low; **the confirmation alert fires when that final higher low
+  confirms** (min 5 pivots). The first low anchors the lower boundary
+  LINE — it runs from it through the HLs, not just between two HLs. The
+  first low and first high are label-exempt; every later low must be HL.
+  SHORT (descending) mirrors: `[high, low, LH, EL, LH]` — the line starts
+  from the first high. Boxes keep both first-pivot exemptions.
 - **Interior close integrity (user rule 2026-09-17):** candle closes
   between the window's first and last pivot must stay within the
   boundaries. A close beyond a boundary by more than

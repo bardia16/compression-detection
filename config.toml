@@ -27,9 +27,9 @@ selection_order = ["ascending_triangle", "descending_triangle", "box"]
 
 [detection.min_pivots]
 box = 4
-descending_triangle = 4
-ascending_triangle = 4
-symmetrical_triangle = 4
+descending_triangle = 5
+ascending_triangle = 5
+symmetrical_triangle = 5
 falling_wedge = 5
 rising_wedge = 5
 

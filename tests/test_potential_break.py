@@ -80,6 +80,7 @@ def _inst(symbol="SUIUSDT", tf="1h", type_="box", state=STATE_CONFIRMED,
 class FakeTG:
     def __init__(self):
         self.photos = []      # (caption, img, reply_to, chat_id)
+        self.groups = []      # (caption, [imgs], reply_to, chat_id)
         self.texts = []       # (text, reply_to, chat_id)
         self._n = 100
 
@@ -91,6 +92,12 @@ class FakeTG:
     async def post_photo(self, caption, img, reply_to_id=None, chat_id=None):
         self._n += 1
         self.photos.append((caption, img, reply_to_id, chat_id))
+        return self._n
+
+    async def post_media_group(self, caption, images, reply_to_id=None,
+                               chat_id=None):
+        self._n += 1
+        self.groups.append((caption, list(images), reply_to_id, chat_id))
         return self._n
 
     async def delete(self, mid, why=""):
@@ -334,12 +341,13 @@ def test_dispatch_sends_main_and_low_tf_charts(cfg, monkeypatch):
     assert calls[0]["lines"] == [100.0, 110.0]
     # low chart = box low + the pattern's mid (last low-TF high)
     assert calls[1]["lines"] == [100.0, hit["mid_price"]]
-    # one alert id, two photos (channel only — the DM mirror is separate),
-    # caption on the first
-    chan = [p for p in tg.photos if p[3] is None]
-    assert len(chan) == 2
-    assert "Long Potential Break" in chan[0][0]
-    assert chan[1][0] == "🎯 15m pattern chart"
+    # BOTH charts in ONE album message (channel), caption on the album
+    chan_groups = [g for g in tg.groups if g[3] is None]
+    assert len(chan_groups) == 1
+    assert len(chan_groups[0][1]) == 2
+    assert "Long Potential Break" in chan_groups[0][0]
+    # no stray separate photos for the two-chart case
+    assert not [p for p in tg.photos if p[3] is None]
     assert sends[0]["msg_id"] is not None
 
 
@@ -347,9 +355,9 @@ def test_dispatch_replies_to_box_confirmation(cfg, monkeypatch):
     inst = _inst(msg_ids=[11])
     hit = find_potential(mk(long_path()), "long", CFG)
     tg, calls, _ = _dispatch(cfg, monkeypatch, {"pattern_tf": "15m", **hit}, inst)
-    # both photos reply onto msg 11 (the compression confirmation)
-    assert tg.photos[0][2] == 11
-    assert tg.photos[1][2] == 11
+    # the album replies onto msg 11 (the compression confirmation)
+    chan = [g for g in tg.groups if g[3] is None]
+    assert chan[0][2] == 11
 
 
 def test_dispatch_mirrors_both_charts_to_dm(cfg, monkeypatch):
@@ -357,9 +365,10 @@ def test_dispatch_mirrors_both_charts_to_dm(cfg, monkeypatch):
     inst.dm_msg_ids = [22]
     hit = find_potential(mk(long_path()), "long", CFG)
     tg, _, _ = _dispatch(cfg, monkeypatch, {"pattern_tf": "15m", **hit}, inst)
-    dm_photos = [p for p in tg.photos if p[3] == "5659605264"]
-    assert len(dm_photos) == 2
-    assert dm_photos[0][2] == 22          # replies onto the mirrored compression
+    dm_groups = [g for g in tg.groups if g[3] == "5659605264"]
+    assert len(dm_groups) == 1            # one album, not two photos
+    assert len(dm_groups[0][1]) == 2
+    assert dm_groups[0][2] == 22          # replies onto the mirrored compression
 
 
 def test_dispatch_main_only_when_pattern_is_on_main_tf(cfg, monkeypatch):
@@ -368,8 +377,12 @@ def test_dispatch_main_only_when_pattern_is_on_main_tf(cfg, monkeypatch):
     tg, calls, _ = _dispatch(cfg, monkeypatch, {"pattern_tf": "1h", **hit}, inst,
                              pattern_on_low_tf=False)
     assert [c["tf"] for c in calls] == ["1h"]
-    assert len([p for p in tg.photos if p[3] is None]) == 1   # channel only
-    assert len([p for p in tg.photos if p[3]]) == 1           # DM mirror
+    # exactly one message per destination, carrying exactly one chart
+    chan = [g for g in tg.groups if g[3] is None] + \
+           [p for p in tg.photos if p[3] is None]
+    dm = [g for g in tg.groups if g[3]] + [p for p in tg.photos if p[3]]
+    assert len(chan) == 1 and len(dm) == 1
+    assert len(chan[0][1]) == 1 if isinstance(chan[0], tuple) and len(chan[0]) == 4 and isinstance(chan[0][1], list) else True
 
 
 # ── freshness window (user choice 2026-09-27: 12h) ────────────────────

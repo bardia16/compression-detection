@@ -508,13 +508,24 @@ class Engine:
     async def _post_photos(self, caption: str, sub_caption: str,
                            imgs: List[bytes], reply_to: Optional[int],
                            chat_id: Optional[str] = None) -> Optional[int]:
-        """Post a photo sequence: the first carries the caption, the rest a
-        short label. Text-only when nothing uploaded. Returns the id of the
-        FIRST message (that is the alert's id / reply anchor)."""
-        first: Optional[int] = None
+        """Post the alert's chart(s): ONE message when there is a single
+        chart, ONE album carrying both when the pattern was found on the
+        low TF (user rule 2026-09-27 — both charts in the same message).
+        Separate photos then text are only fallbacks when the album fails.
+        Returns the id of the FIRST message (the alert's id / anchor)."""
         if self.tg is None:
             return None
-        for i, im in enumerate(imgs or []):
+        imgs = imgs or []
+        if not imgs:
+            return await self.tg.post(caption, reply_to_id=reply_to,
+                                      chat_id=chat_id)
+        mid = await self.tg.post_media_group(caption, imgs,
+                                             reply_to_id=reply_to,
+                                             chat_id=chat_id)
+        if mid is not None:
+            return mid
+        first: Optional[int] = None
+        for i, im in enumerate(imgs):
             m = await self.tg.post_photo(caption if i == 0 else sub_caption,
                                          im, reply_to_id=reply_to,
                                          chat_id=chat_id)

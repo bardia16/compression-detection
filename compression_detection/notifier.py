@@ -14,6 +14,7 @@ pinned equality tests in tests/test_notifier.py in the same edit.
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import List, Optional
 from urllib.parse import quote
@@ -171,6 +172,49 @@ class Telegram:
         if d.get("ok"):
             return d["result"]["message_id"]
         log.warning("tg post_photo failed: %s", d)
+        return None
+
+    async def post_media_group(self, caption: str, images: List[bytes],
+                               reply_to_id: Optional[int] = None,
+                               chat_id: Optional[str] = None) -> Optional[int]:
+        """Post N photos as ONE album message (user rule 2026-09-27: when a
+        potential break carries a low-TF chart, both charts go in one
+        message — not two separate posts). The caption rides on the first
+        photo; Telegram allows exactly one per album.
+        Returns the FIRST message id (the alert's id / reply anchor)."""
+        if not images:
+            return None
+        if len(images) == 1:
+            return await self.post_photo(caption, images[0], reply_to_id,
+                                         chat_id)
+        ses = await self._session()
+        media = []
+        for i in range(len(images)):
+            item = {"type": "photo", "media": f"attach://photo{i}"}
+            if i == 0:
+                item["caption"] = caption
+                item["parse_mode"] = "HTML"
+            media.append(item)
+        form = aiohttp.FormData()
+        form.add_field("chat_id", str(chat_id or self.chat_id))
+        form.add_field("media", json.dumps(media))
+        for i, img in enumerate(images):
+            form.add_field(f"photo{i}", img, filename=f"alert{i}.png",
+                           content_type="image/png")
+        if reply_to_id:
+            form.add_field("reply_to_message_id", str(reply_to_id))
+        try:
+            async with ses.post(
+                f"https://api.telegram.org/bot{self.token}/sendMediaGroup",
+                data=form,
+            ) as r:
+                d = await r.json(content_type=None)
+        except Exception as exc:
+            log.warning("tg post_media_group failed: %s", exc)
+            return None
+        if d.get("ok") and d.get("result"):
+            return d["result"][0].get("message_id")
+        log.warning("tg post_media_group failed: %s", d)
         return None
 
     async def delete(self, msg_id: int, why: str = "",

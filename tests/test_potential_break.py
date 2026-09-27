@@ -749,3 +749,73 @@ def test_potential_pass_runs_before_the_lifecycle_pass(cfg, monkeypatch):
     scan(cfg)
     assert order[0] == "potential", order[:4]
     assert "lifecycle" in order
+
+
+# ── LIVE third swing (loosened 2026-09-27, PENDLE case) ───────────────
+# spread=1.0 makes ATR7(true-range) ~2x2 wide, so the zigzag confirm
+# (1.2xATR7) exceeds the whole move, while ATR14(close-only) stays small:
+# the third swing can only be taken on the LIVE route.
+
+def _live_long_path(tail: str = "clear"):
+    """H0 -> L1 -> H1(touch) -> L2 106.5 (never zigzag-confirms) -> tail."""
+    hi0, hi1, lo2 = 110.1, 110.0, 106.5
+    path = (_line(100, hi0, 12) + _line(hi0, 100, 12) +
+            _line(100, hi1, 12) + _line(hi1, lo2, 8))
+    if tail == "clear":
+        path += _line(lo2, 107.6, 6)        # close > lo2+eq, < lo2+1.2*ATR7
+    elif tail == "flat":
+        path += _line(lo2, lo2 + 0.05, 6)   # never clears lo2+eq
+    else:                                    # below the box band
+        path += _line(99.0, 100.6, 6)
+    return mk(path, spread=1.0)
+
+
+def test_live_third_swing_fires_before_the_zigzag_confirm():
+    from compression_detection.potential_break import _zigzag
+    candles = _live_long_path()
+    # the third low is NOT in the confirmed zigzag — only the live route
+    # can produce this hit
+    assert all(abs(p.price - 106.5) > 1e-9 for p in _zigzag(candles, CFG))
+    hit = fp(candles, "long")
+    assert hit is not None
+    assert hit["live"] is True
+    assert hit["second_price"] == 106.5
+    assert hit["touch_price"] == 110.0
+    # confirm_ts = the close that cleared lo2 + eq (inside the tail)
+    assert hit["confirm_ts"] in {c.ts for c in candles[-6:]}
+
+
+def test_live_third_swing_never_cleared_by_close_returns_none():
+    assert fp(_live_long_path(tail="flat"), "long") is None
+
+
+def test_live_third_below_the_box_band_rejected():
+    assert fp(_live_long_path(tail="below"), "long") is None
+
+
+def test_live_third_short_mirror_fires():
+    from compression_detection.potential_break import _zigzag
+    lo0, hi1, lo1, hi2 = 99.8, 105.0, 100.0, 104.0
+    path = (_line(110, lo0, 12) + _line(lo0, hi1, 12) +
+            _line(hi1, lo1, 12) + _line(lo1, hi2, 8) +
+            _line(hi2, 102.8, 6))            # close < hi2-eq, never zigzag
+    candles = mk(path, spread=1.0)
+    assert all(abs(p.price - hi2) > 1e-9 for p in _zigzag(candles, CFG))
+    hit = fp(candles, "short")
+    assert hit is not None
+    assert hit["live"] is True
+    assert hit["second_price"] == hi2
+    assert hit["touch_price"] == 100.0
+
+
+def test_live_third_requires_the_touch_to_be_the_last_main_pivot():
+    """A confirmed pivot AFTER the touch supersedes it: the live route must
+    refuse even though the live low itself would clear the band."""
+    hi0, hi1 = 110.1, 110.0
+    path = (_line(100, hi0, 12) + _line(hi0, 100, 12) +
+            _line(100, hi1, 12) + _line(hi1, 104, 10) +   # low 104 confirms
+            _line(104, 107, 8) +                          # high 107 confirms
+            _line(107, 104.5, 14) +                       # low 104.5 (live)
+            _line(104.5, 105.6, 6))                       # clears, not confirm
+    candles = mk(path, spread=1.0)
+    assert fp(candles, "long") is None

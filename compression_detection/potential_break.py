@@ -20,8 +20,18 @@ Positional freshness of the touch (user rule 2026-09-27):
     · third swing on the MAIN  tf -> the pivot right BEFORE the third must
       be the touch (and the third is the last main pivot)
 
-Both steps are zigzag-confirmed pivots, so the alert lands on the candle
-that confirmed the third swing (`_confirm_map`).
+STEP 2 has two confirmation routes (loosened 2026-09-27, PENDLE case):
+    · CONFIRMED third swing — the alert lands on the candle that confirmed
+      it (`_confirm_map`), as before.
+    · LIVE third swing — when the zigzag threshold (1.2 x ATR7) is
+      inflated by earlier volatility it can exceed the whole box height,
+      so a valid higher low only "confirms" ON the breakout candle and
+      `_drop_moot_potential` eats the alert. Accept the UNCONFIRMED
+      extreme instead once a CLOSE clears it by the eq band (ATR14 — the
+      same band STEP 2 measures with); `confirm_ts` is that clearing
+      candle. Positional freshness: the touch must still be the LAST
+      confirmed main-tf pivot. A confirmed hit always wins when both
+      qualify.
 
 Why the shape changed (XPL/PIEVERSE, 2026-09-27): the earlier
 "mid touches the line, third sits on the other line" rule compared nothing
@@ -74,6 +84,13 @@ def _confirm_map(candles: List[Candle], cfg) -> Dict[int, int]:
 def _zigzag(candles: List[Candle], cfg):
     return ZigZag(coef=cfg.zigzag_coef,
                   atr_length=cfg.zigzag_atr_length).feed_all(candles)
+
+
+def _provisional(candles: List[Candle], cfg):
+    """The UNCONFIRMED zigzag extreme (live swing) of a candle series."""
+    zz = ZigZag(coef=cfg.zigzag_coef, atr_length=cfg.zigzag_atr_length)
+    zz.feed_all(candles)
+    return zz.provisional
 
 
 def find_potential(side: str,
@@ -193,6 +210,57 @@ def find_potential(side: str,
                 "second_price": p.price,
                 "confirm_ts": conf,
             }
+
+        # ── LIVE third swing (loosened 2026-09-27, PENDLE case) ─────────
+        # The zigzag confirm (1.2 x ATR7) can be wider than the box itself
+        # after a volatile leg: PENDLE's higher low needed close > 2.648
+        # while the whole box was 2.58-2.655, so it only confirmed on the
+        # breakout candle and the same-scan breakout dropped the alert.
+        # Route: the UNCONFIRMED extreme, once a CLOSE clears it by eq
+        # (ATR14). Touch must still be the last confirmed main pivot.
+        if hit is None and last_main is not None \
+                and last_main.ts == touch.ts:
+            live = _provisional(candles, cfg)
+            if live is not None and touch.ts < live.ts and live.ts in idx:
+                eq_l = a14[idx[live.ts]]
+                if eq_l is not None and eq_l > 0:
+                    up_l, lo_l = lines(live.ts)
+                    band_ok = up_l is not None and lo_l is not None
+                    if band_ok:
+                        if side == "long":
+                            band_ok = (not live.is_high
+                                       and live.price > lo_l + eq_l)
+                        else:
+                            band_ok = (live.is_high
+                                       and live.price < up_l - eq_l)
+                    if band_ok:
+                        confirm_ts = None
+                        for c in candles[idx[live.ts]:]:
+                            if side == "long" and c.close > live.price + eq_l:
+                                confirm_ts = c.ts
+                                break
+                            if side == "short" and c.close < live.price - eq_l:
+                                confirm_ts = c.ts
+                                break
+                        if confirm_ts is not None and (
+                                anchor_ts is None
+                                or confirm_ts >= anchor_ts):
+                            hit = {
+                                "side": side,
+                                "pattern_tf": tf,
+                                "touch_ts": touch.ts,
+                                "touch_price": touch.price,
+                                "touch_label": want,
+                                "first_ts": touch.ts,
+                                "first_price": touch.price,
+                                "mid_ts": touch.ts,
+                                "mid_price": touch.price,
+                                "mid_label": want,
+                                "second_ts": live.ts,
+                                "second_price": live.price,
+                                "confirm_ts": confirm_ts,
+                                "live": True,
+                            }
         if hit is not None:
             return hit     # preference order: lower tf first
     return None

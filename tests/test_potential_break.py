@@ -49,22 +49,40 @@ BOX_UPPER, BOX_LOWER, BOX_ATR = 109.5, 100.0, 1.0
 BOX_AT = lambda ts: (BOX_UPPER, BOX_LOWER)  # noqa: E731
 
 
-def fp(candles, side, cfg=CFG, **kw):
-    """find_potential with the fixture box lines injected."""
+def fp(candles, side, cfg=CFG, main_candles=None, scan=None, **kw):
+    """find_potential with the fixture box lines injected.
+
+    Default: one timeframe — it is both the MAIN tf (STEP 1 touch) and the
+    only scan entry (STEP 2 confirming swing)."""
     kw.setdefault("box_at", BOX_AT)
     kw.setdefault("touch_atr", BOX_ATR)
-    return find_potential(candles, side, cfg, **kw)
+    kw.setdefault("main_tf", "1h")
+    main = candles if main_candles is None else main_candles
+    entries = scan if scan is not None else [("1h", candles)]
+    return find_potential(side, main, entries, cfg, **kw)
 
 
-def long_path(mid_is_eh: bool = True, second_higher: bool = True):
-    """H0 → L1 → H1 → L2 → rally. H1 is EH when it sits back on H0; L2 is
-    the higher low when it stays above L1."""
+def long_path(mid_is_eh: bool = True, second_higher: bool = True,
+              lo2=None):
+    """H0 → L1 → H1 → L2 → rally. H1 touches when it sits back on H0; L2 is
+    the confirming low (override it with `lo2` to place it inside/outside
+    the equality band)."""
     hi0 = 110.1
-    hi1 = 110.0 if mid_is_eh else 115.0      # HH (not EH) when False
-    lo2 = 105.0 if second_higher else 95.0   # LL (not HL) when False
+    hi1 = 110.0 if mid_is_eh else 115.0      # no touch when False
+    if lo2 is None:
+        lo2 = 105.0 if second_higher else 95.0   # below the box when False
     return (_line(100, hi0, 12) + _line(hi0, 100, 12) +
             _line(100, hi1, 12) + _line(hi1, lo2, 8) +
             _line(lo2, 120, 12))
+
+
+def long_main():
+    """Main tf that ends with the touch CONFIRMED as the last pivot — a
+    small unconfirmed pullback after it, so a lower-tf third can satisfy
+    'the touch is the last main pivot'."""
+    hi0, hi1 = 110.1, 110.0
+    return (_line(100, hi0, 12) + _line(hi0, 100, 12) +
+            _line(100, hi1, 12) + _line(hi1, 106, 4))   # ends mid-pullback
 
 
 def short_path(second_lower: bool = True):
@@ -133,20 +151,20 @@ def cfg(tmp_path, monkeypatch):
 def test_long_pattern_detected():
     hit = fp(mk(long_path()), "long", CFG)
     assert hit is not None
-    assert hit["first_price"] == pytest.approx(100.0)   # the low
-    assert hit["mid_price"] == pytest.approx(110.0)     # EH (box high)
-    assert hit["mid_label"] == "EH"
+    assert hit["mid_label"] == "EH"                     # main-tf touch
+    assert hit["mid_price"] == pytest.approx(110.0)     # on the box high
+    assert hit["first_price"] == hit["mid_price"]       # the touch IS first
     assert hit["second_price"] == pytest.approx(105.0)  # higher low
-    assert hit["second_price"] > hit["first_price"]
-    assert hit["confirm_ts"] >= hit["second_ts"]        # confirmed on a later bar
+    assert hit["pattern_tf"] == "1h"
+    assert hit["confirm_ts"] >= hit["second_ts"]        # confirmed later
 
 
 def test_short_pattern_detected():
     hit = fp(mk(short_path()), "short", CFG)
     assert hit is not None
-    assert hit["mid_price"] == pytest.approx(100.1)     # EL (box low)
-    assert hit["mid_label"] == "EL"
-    assert hit["second_price"] < hit["first_price"]     # lower high
+    assert hit["mid_label"] == "EL"                     # main-tf touch
+    assert hit["mid_price"] == pytest.approx(100.1)     # on the box low
+    assert hit["second_price"] == pytest.approx(108.0)  # lower high
     assert hit["confirm_ts"] >= hit["second_ts"]
 
 
@@ -179,32 +197,43 @@ def test_touch_tolerance_is_the_box_atr():
     import compression_detection.potential_break as pb
     mid_px = 110.0                      # long_path()'s middle high
     for offset, expect in ((BOX_ATR, True), (BOX_ATR * 1.01, False)):
-        hit = find_potential(mk(long_path()), "long", CFG,
-                             box_at=lambda ts, o=offset: (mid_px + o,
-                                                         BOX_LOWER),
-                             touch_atr=BOX_ATR)
+        hit = fp(mk(long_path()), "long",
+                 box_at=lambda ts, o=offset: (mid_px + o, BOX_LOWER),
+                 touch_atr=BOX_ATR)
         assert (hit is not None) is expect, f"offset={offset}"
 
 
 def test_no_box_lines_fails_closed():
     """No box_at / touch_atr -> no pattern, never a guess."""
-    assert find_potential(mk(long_path()), "long", CFG) is None
-    assert find_potential(mk(long_path()), "long", CFG,
-                          box_at=BOX_AT) is None
+    assert find_potential("long", mk(long_path()), [("1h", mk(long_path()))],
+                          CFG, main_tf="1h") is None
+    assert find_potential("long", mk(long_path()), [("1h", mk(long_path()))],
+                          CFG, main_tf="1h", box_at=BOX_AT) is None
 
 
-def test_third_swing_equal_to_the_box_line_passes():
-    """The line is fitted THROUGH the pivot, so line(ts) and pivot price can
-    differ only by float noise — an exact touch must not read as 'below'.
-    (XPL: third 0.10976 == lower line 0.10976 at that bar.)"""
-    third = 105.0                       # long_path()'s third low
-    # exact + float-noise-below the line -> still on/above it
-    for lo in (third, third - 1e-15):
-        assert fp(mk(long_path()), "long", CFG,
-                  box_at=lambda ts, v=lo: (BOX_UPPER, v)) is not None
-    # a REAL miss (1e-4 below) -> rejected
-    assert fp(mk(long_path()), "long", CFG,
-              box_at=lambda ts: (BOX_UPPER, third + 1e-4)) is None
+def test_third_must_clear_the_equality_band():
+    """'higher than the low of box, EXCEEDING the equal threshold': sitting
+    on the line is not enough — the swing must clear box_low + ATR14."""
+    from compression_detection.atr import atr_series
+
+    def eq_at(candles, ts):
+        a14 = atr_series(candles, 14, "close_only")
+        return a14[{c.ts: i for i, c in enumerate(candles)}[ts]]
+
+    # 105 clears the band comfortably -> fires
+    hit = fp(mk(long_path()), "long")
+    assert hit is not None
+    candles = mk(long_path())
+    eq = eq_at(candles, hit["second_ts"])
+    assert hit["second_price"] > BOX_LOWER + eq
+    # a third that clears the LINE but not the band -> rejected
+    in_band = BOX_LOWER + 0.5 * eq
+    assert fp(mk(long_path(lo2=in_band)), "long") is None
+    # ...and a swing clearly above the band -> fires (each path carries its
+    # own ATR14, so the clearance has to be generous)
+    just_over = BOX_LOWER + 2.5 * eq
+    assert fp(mk(long_path(lo2=just_over)), "long") is not None
+
 
 
 def test_rejects_short_when_second_higher():
@@ -256,7 +285,7 @@ def test_fmt_potential_long():
     lines = cap.split("\n")
     assert lines[0] == ("🟢 <b>SUIUSDT</b> — 1H Compression  ·  "
                         "Long Potential Break")
-    assert lines[1] == "🎯 15m pattern · 100 → EH 110 → higher low 105 ✓"
+    assert lines[1] == "🎯 15m pattern · touch EH 110 → higher low 105 ✓"
 
 
 def test_fmt_potential_short():
@@ -266,7 +295,7 @@ def test_fmt_potential_short():
     lines = cap.split("\n")
     assert lines[0] == ("🔴 <b>SUIUSDT</b> — 1H Compression  ·  "
                         "Short Potential Break")
-    assert lines[1] == "🎯 1H pattern · 110 → EL 100.1 → lower high 108 ✓"
+    assert lines[1] == "🎯 1H pattern · touch EL 100.1 → lower high 108 ✓"
 
 
 # ── engine: detection pass ─────────────────────────────────────────────
@@ -277,14 +306,13 @@ def _engine(cfg, monkeypatch, dm=None):
 
 
 def test_actions_prefer_low_tf_when_both_have_it(cfg, monkeypatch):
-    """SUI case: 1H and 15m both carry the pattern → the low-TF one wins
-    (its alert ships both charts)."""
+    """SUI case: the touch sits in the main tf, the confirming swing is
+    found one tf below → the low-TF alert wins (it ships both charts)."""
     e = _engine(cfg, monkeypatch)
     inst = _inst()
-    long_c = mk(long_path())
     acts = e._potential_actions({inst.id: inst},
-                                {(inst.symbol, "1h"): long_c,
-                                 (inst.symbol, "15m"): long_c},
+                                {(inst.symbol, "1h"): mk(long_main()),
+                                 (inst.symbol, "15m"): mk(long_path())},
                                 now_s=NOW_S)
     longs = [a for a in acts if a.detail["side"] == "long"]
     assert len(longs) == 1
@@ -306,13 +334,17 @@ def test_actions_fall_back_to_main_tf(cfg, monkeypatch):
     assert longs[0].detail["pattern_tf"] == "1h"
 
 
-def test_actions_fire_once_per_side(cfg, monkeypatch):
+def test_actions_fire_once_per_box(cfg, monkeypatch):
+    """ONE potential per box (user rule 2026-09-27): firing one side writes
+    BOTH flags, so no second alert can follow."""
     e = _engine(cfg, monkeypatch)
     inst = _inst()
     long_c = mk(long_path())
-    key = {(inst.symbol, "15m"): long_c}
+    key = {(inst.symbol, "1h"): long_c, (inst.symbol, "15m"): long_c}
     first = e._potential_actions({inst.id: inst}, key, now_s=NOW_S)
     assert len(first) == 1
+    assert inst.notified["potential_long"] is True
+    assert inst.notified["potential_short"] is True   # both suppressed
     second = e._potential_actions({inst.id: inst}, key, now_s=NOW_S + 600)
     assert second == []
     assert len(inst.events) == 1
@@ -322,13 +354,14 @@ def test_actions_fire_once_per_side(cfg, monkeypatch):
 def test_actions_both_sides_can_fire(cfg, monkeypatch):
     e = _engine(cfg, monkeypatch)
     inst = _inst()
+    long_c = mk(long_path())
     acts = e._potential_actions(
         {inst.id: inst},
-        {(inst.symbol, "15m"): mk(long_path())},
+        {(inst.symbol, "1h"): long_c, (inst.symbol, "15m"): long_c},
         now_s=NOW_S)
     sides = {a.detail["side"] for a in acts}
     assert "long" in sides
-    # short needs its own path — with the long one there is no short hit
+    # the long fixture has no EL touch -> no short hit
     assert "short" not in sides
 
 
@@ -384,7 +417,7 @@ def _dispatch(cfg, monkeypatch, detail, inst, pattern_on_low_tf=True,
 def test_dispatch_sends_main_and_low_tf_charts(cfg, monkeypatch):
     inst = _inst()
     hit = fp(mk(long_path()), "long", CFG)
-    detail = {"pattern_tf": "15m", **hit}
+    detail = {**hit, "pattern_tf": "15m"}
     tg, calls, sends = _dispatch(cfg, monkeypatch, detail, inst)
 
     assert [c["tf"] for c in calls] == ["1h", "15m"]     # main then low
@@ -415,7 +448,7 @@ def test_dispatch_mirrors_both_charts_to_dm(cfg, monkeypatch):
     inst = _inst(msg_ids=[11])
     inst.dm_msg_ids = [22]
     hit = fp(mk(long_path()), "long", CFG)
-    tg, _, _ = _dispatch(cfg, monkeypatch, {"pattern_tf": "15m", **hit}, inst)
+    tg, _, _ = _dispatch(cfg, monkeypatch, {**hit, "pattern_tf": "15m"}, inst)
     dm_groups = [g for g in tg.groups if g[3] == "5659605264"]
     assert len(dm_groups) == 1            # one album, not two photos
     assert len(dm_groups[0][1]) == 2
@@ -512,26 +545,51 @@ def test_notified_defaults_when_state_has_no_flags():
 
 
 # ── direction label on the SECOND swing (user 2026-09-27, QNT case) ───
-def test_second_low_equal_to_the_neighbour_still_fires():
-    """Neighbour labels are no longer consulted: a third low that is 'EL'
-    against the previous low but ON/ABOVE the box low is a valid higher low
-    (user rule 2026-09-27: judged against the box, 'not the prev low')."""
-    # L1=100, L2=100.5 -> |Δ|=0.5 <= ATR14 (~0.84) -> neighbor label EL,
-    # but 100.5 sits above the box low (100) -> the pattern qualifies.
-    path = (_line(100, 110.1, 12) + _line(110.1, 100, 12) +
-            _line(100, 110, 12) + _line(110, 100.5, 8) +
-            _line(100.5, 120, 12))
-    assert fp(mk(path), "long", CFG) is not None
-
-
-
-def test_second_high_equal_to_the_neighbour_still_fires():
-    """Short mirror: third high 'EH' to the previous high but ON/BELOW the
-    box high -> valid lower high under the box rule."""
+def test_third_inside_the_band_is_rejected_short():
+    """Short mirror: a lower high that does not clear box_high − ATR14 is
+    inside the equality band, whatever the neighbour label says."""
+    from compression_detection.atr import atr_series
     path = (_line(110, 100, 12) + _line(100, 110, 12) +
-            _line(110, 100.1, 12) + _line(100.1, 109.5, 8) +
-            _line(109.5, 90, 12))
-    assert fp(mk(path), "short", CFG) is not None
+            _line(110, 100.1, 12) + _line(100.1, 108.9, 8) +
+            _line(108.9, 90, 12))
+    candles = mk(path)
+    a14 = atr_series(candles, 14, "close_only")
+    idx = {c.ts: i for i, c in enumerate(candles)}
+    # find the third high's eq first (reject case: inside the band)
+    assert fp(candles, "short") is None
+    # and the default 108.0 clears band 109.5 − eq -> fires
+    assert fp(mk(short_path()), "short") is not None
+    _ = (a14, idx)
+
+
+def test_one_per_box_freshest_confirm_wins(cfg, monkeypatch):
+    """Both sides pass -> exactly ONE action, the fresher confirmation, and
+    both flags written (PIEVERSE case: long+short 5 seconds apart)."""
+    import compression_detection.engine as em
+    e = _engine(cfg, monkeypatch)
+    inst = _inst()
+    long_c = mk(long_path())
+    key = {(inst.symbol, "1h"): long_c, (inst.symbol, "15m"): long_c}
+    real = em.find_potential
+
+    def fake(side, main_candles, scan, c, **kw):
+        out = {"side": side, "pattern_tf": "1h",
+               "touch_ts": T0, "touch_price": 110.0, "touch_label": "EH",
+               "first_ts": T0, "first_price": 110.0,
+               "mid_ts": T0, "mid_price": 110.0, "mid_label": "EH",
+               "second_ts": T0 + 10 * STEP, "second_price": 105.0,
+               "confirm_ts": T0 + (20 * STEP if side == "long"
+                                   else 40 * STEP)}
+        return out if side in ("long", "short") else None
+
+    monkeypatch.setattr(em, "find_potential", fake)
+    acts = e._potential_actions({inst.id: inst}, key, now_s=NOW_S)
+    assert len(acts) == 1
+    assert acts[0].detail["side"] == "short"      # freshest confirm wins
+    assert inst.notified["potential_long"] is True
+    assert inst.notified["potential_short"] is True
+
+
 
 def test_compression_dispatches_before_potential_break():
     """The box confirmation is the message every other alert threads onto;

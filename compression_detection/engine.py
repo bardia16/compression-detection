@@ -279,14 +279,16 @@ class Engine:
                            now_s: int) -> List[Action]:
         """Potential-break pattern pass (user rule 2026-09-27).
 
-        Active BOXES only. Per side: the box's OWN tf and the TF below it
-        are both probed, LOW TF FIRST — when a scan sees the pattern on
-        both, the low-TF one wins because its alert carries both charts
-        (the low-TF chart is the one with the pattern detail). The flag is
-        written at EMIT time, the same contract the breakout verdict uses,
-        so a scan can never re-arm an alert already in flight.
+        Active BOXES only. The touch lives in the BOX'S OWN tf (a confirmed
+        EH/EL on the line); the confirming swing may sit on the box tf or
+        one tf below (lower tf first — its alert carries both charts).
 
-        Returns at most one action per instance per side.
+        ONE alert per box (user rule 2026-09-27, PIEVERSE case: a long and
+        a short went out 5 seconds apart): both sides are evaluated, the
+        FRESHEST confirmation wins, and firing one side suppresses the
+        other (both flags are written). The flag is written at EMIT time,
+        the same contract the breakout verdict uses, so a scan can never
+        re-arm an alert already in flight.
         """
         out: List[Action] = []
         for inst in list(instances.values()):
@@ -307,34 +309,50 @@ class Engine:
                 bar = _ref["bar"] + (ts - _ref["ts"]) / _ms
                 return (_u.at(bar), _l.at(bar))
 
+            # scan preference: the tf one below the box first, then the
+            # box's own tf (STEP 1's touch always comes from the box tf).
+            main_candles = candles_by_key.get((inst.symbol, inst.tf))
+            if not main_candles:
+                continue
+            low_tf = LOWER_TF.get(inst.tf)
+            scan = [(t, candles_by_key.get((inst.symbol, t)))
+                    for t in (low_tf, inst.tf) if t]
+            scan = [(t, c) for t, c in scan if c]
+
+            fresh_s = (now_s - POTENTIAL_FRESH_S) * 1000
+            hits = []
             for side in ("long", "short"):
                 if inst.notified.get(f"potential_{side}"):
                     continue
-                for tf in (LOWER_TF.get(inst.tf), inst.tf):
-                    if not tf:
-                        continue
-                    candles = candles_by_key.get((inst.symbol, tf))
-                    if not candles:
-                        continue
-                    hit = find_potential(candles, side, self.cfg,
-                                         anchor_ts=inst.anchor_ts,
-                                         box_at=box_at,
-                                         touch_atr=inst.atr)
-                    if hit is None:
-                        continue
-                    # freshness window (user choice 2026-09-27): a
-                    # confirmation older than 12h is old news — skip it and
-                    # keep looking (the main TF may hold a fresh one).
-                    if hit["confirm_ts"] < (now_s - POTENTIAL_FRESH_S) * 1000:
-                        continue
-                    inst.notified[f"potential_{side}"] = True
-                    inst.add_event("potential", now_s, side=side, pattern_tf=tf,
-                                   mid=hit["mid_price"],
-                                   second=hit["second_price"],
-                                   confirm_ts=hit["confirm_ts"])
-                    out.append(Action("potential_break", inst,
-                                      {"pattern_tf": tf, **hit}))
-                    break       # one alert per side
+                hit = find_potential(side, main_candles, scan, self.cfg,
+                                     main_tf=inst.tf,
+                                     anchor_ts=inst.anchor_ts,
+                                     box_at=box_at,
+                                     touch_atr=inst.atr)
+                if hit is None:
+                    continue
+                # freshness window (user choice 2026-09-27): a confirmation
+                # older than 12h is old news.
+                if hit["confirm_ts"] < fresh_s:
+                    continue
+                hit["side"] = side
+                hits.append(hit)
+
+            if not hits:
+                continue
+            # ONE per box: the freshest confirmation wins (a tie keeps the
+            # earlier list order — long first).
+            hits.sort(key=lambda h: h["confirm_ts"], reverse=True)
+            win = hits[0]
+            side = win["side"]
+            for s in ("long", "short"):
+                inst.notified[f"potential_{s}"] = True
+            inst.add_event("potential", now_s, side=side,
+                           pattern_tf=win["pattern_tf"],
+                           mid=win["mid_price"],
+                           second=win["second_price"],
+                           confirm_ts=win["confirm_ts"])
+            out.append(Action("potential_break", inst, dict(win)))
         return out
 
     @staticmethod

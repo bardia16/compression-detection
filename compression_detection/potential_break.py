@@ -1,34 +1,43 @@
-"""Potential-break confirmation pattern (user rule 2026-09-27, revised).
+"""Potential-break confirmation pattern (user rules 2026-09-27, final).
 
-Three swings, and EVERY judgment is made against the BOX's boundary lines —
-never against the neighbouring pivot on the scanned timeframe (user rule
-2026-09-27, XPL case: "this high should be a lower high to the box high!,
-not the prev low"):
+Two steps, both anchored on the BOX (never on a neighbouring pivot of the
+scanned timeframe):
 
-  LONG : touch the box HIGH with the middle pivot, then the confirmed
-         low must sit on/above the box LOW line
-  SHORT: touch the box LOW  with the middle pivot, then the confirmed
-         high must sit on/below the box HIGH line
+STEP 1 — the TOUCH lives in the MAIN tf:
+    the box side is touched by a CONFIRMED EH (long) / EL (short) on the
+    box's own timeframe, sitting on the box line (± the box's ATR).
+STEP 2 — the CONFIRMING swing may live in the MAIN tf or the LOWER tf and
+    must clear the EQUALITY threshold against the OTHER box side:
+    LONG : a confirmed low  > box_low  + eq    ("higher than the low of
+           box, exceeding the equal threshold")
+    SHORT: a confirmed high < box_high − eq
+    eq = ATR14 of the scanned tf (the same band EL/EL labels are built
+    from).
 
-"touch" = |pivot − line| ≤ the box's own ATR. The old rule compared the
-middle pivot to the previous pivot of the same type (EH/EL label) and the
-third swing to the first swing (HL/LH label), which let a 15m mid 7% below
-the box top count as "EH" (XPL: 0.11262 vs box 0.121 — a mere middle
-pivot, no alert) and blocked a third swing that sat right on the box line.
+Positional freshness of the touch (user rule 2026-09-27):
+    · third swing on the LOWER tf -> the touch must be the LAST confirmed
+      pivot of the main tf (nothing has superseded it)
+    · third swing on the MAIN  tf -> the pivot right BEFORE the third must
+      be the touch (and the third is the last main pivot)
 
-The third swing only exists once the zigzag CONFIRMS it (close beyond
-coef × ATR7), so the alert lands on the confirming candle.
+Both steps are zigzag-confirmed pivots, so the alert lands on the candle
+that confirmed the third swing (`_confirm_map`).
 
-Scanned on the box's own TF (main) and one TF down; `LOWER_TF` maps a
-box TF to the timeframe it is checked against. `box_at` is supplied by the
-engine (it owns the Instance and its Line objects) — no box lines, no
-pattern (fail closed).
+Why the shape changed (XPL/PIEVERSE, 2026-09-27): the earlier
+"mid touches the line, third sits on the other line" rule compared nothing
+to the equality band, and a lower-tf candidate could fire while the main tf
+had already moved on — PIEVERSE printed a short 5 seconds after its long.
+
+`box_at` (ts -> (upper, lower)) and `touch_atr` come from the engine, which
+owns the Instance and its Line objects — no box lines, no pattern (fail
+closed).  `LOWER_TF` maps a box tf to the tf one step below it.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from .atr import atr_series
+from .dow import label_all_pivots
 from .models import Candle
 from .zigzag import ZigZag
 
@@ -38,14 +47,11 @@ LOWER_TF: Dict[str, Optional[str]] = {"4h": "1h", "1h": "15m", "15m": None}
 # Freshness window (user choice 2026-09-27): a confirmation older than this
 # is old news — the scan would otherwise backfill patterns that completed
 # days before the box was even detected (PIEVERSE/BANK case: 3 of the 11
-# first-scan hits were 4-5 days stale). Generous enough to cover the box's
-# own detection lag (observed up to ~3.5h) plus a scan gap; short enough
-# that nothing retroactively surfaces.
+# first-scan hits were 4-5 days stale).
 POTENTIAL_FRESH_S = 12 * 3600
 
-# float slack for the "sits on the box line" side test: a pivot that IS the
-# line (the line is fitted through it) differs from line(ts) by ~1e-17 and
-# must not be read as "below the box".
+# float slack for comparisons against a line value (a line fitted through
+# the pivot differs from the pivot price by ~1e-17).
 LINE_EPS_REL = 1e-9
 
 
@@ -65,113 +71,138 @@ def _confirm_map(candles: List[Candle], cfg) -> Dict[int, int]:
     return out
 
 
-def find_potential(candles: List[Candle], side: str, cfg,
+def _zigzag(candles: List[Candle], cfg):
+    return ZigZag(coef=cfg.zigzag_coef,
+                  atr_length=cfg.zigzag_atr_length).feed_all(candles)
+
+
+def find_potential(side: str,
+                   main_candles: List[Candle],
+                   scan: Sequence[Tuple[str, List[Candle]]],
+                   cfg,
+                   *,
+                   main_tf: str,
                    anchor_ts: Optional[int] = None,
-                   box_at=None, touch_atr: Optional[float] = None
-                   ) -> Optional[dict]:
-    """Latest matching pattern on ONE timeframe, or None.
+                   box_at=None,
+                   touch_atr: Optional[float] = None) -> Optional[dict]:
+    """Latest matching pattern for `side`, or None (see module docstring).
 
-    side      "long" | "short" — direction of the expected break
-    anchor_ts the compression's anchor (first pivot ts): the pattern must
-              CONFIRM at or after it — a confirmation that predates the box
-              is not this box's signal.
-    box_at    callable ts(ms) -> (upper, lower): the box's boundary LINES
-              evaluated at that time (the engine owns the Instance).
-    touch_atr the box's own ATR — tolerance of the "middle pivot touches
-              its box side" test.
-
-    Every judgment is made against the BOX lines (see module docstring);
-    with no lines there is no pattern (fail closed).
+    main_candles  candles of the box's own timeframe (STEP 1 lives there)
+    scan          [(tf, candles), ...] in preference order — the engine
+                  passes the lower tf first, the main tf last
     """
     if side not in ("long", "short"):
         raise ValueError(f"side must be long|short, got {side!r}")
     if box_at is None or touch_atr is None:
         return None
-    if len(candles) < cfg.atr14_length + cfg.zigzag_atr_length + 6:
+    if not main_candles:
         return None
 
-    zz = ZigZag(coef=cfg.zigzag_coef, atr_length=cfg.zigzag_atr_length)
-    pivots = zz.feed_all(candles)
-    if len(pivots) < 3:
+    # ── STEP 1: the touch = confirmed EH/EL in the MAIN tf, on the line ──
+    want = "EH" if side == "long" else "EL"
+    main_lab = label_all_pivots(_zigzag(main_candles, cfg),
+                                atr_series(main_candles, cfg.atr14_length,
+                                           cfg.atr14_method))
+    main_pivots = [p for p, _ in main_lab]
+    if len(main_pivots) < 2:
         return None
-    confirms = _confirm_map(candles, cfg)
 
-    def box_lines(ts):
-        """(upper, lower) at ts, or (None, None) when unavailable."""
+    def lines(ts):
         try:
             up, lo = box_at(ts)
         except Exception:
             return None, None
         return (up, lo) if up is not None and lo is not None else (None, None)
 
-    hit: Optional[dict] = None
-    for i in range(len(pivots) - 2):
-        first, mid, second = pivots[i], pivots[i + 1], pivots[i + 2]
-        # alternation only — no neighbour labels are consulted any more
-        if side == "long":
-            if first.is_high or not mid.is_high or second.is_high:
-                continue
-        else:
-            if not first.is_high or mid.is_high or not second.is_high:
-                continue
-
-        up, lo = box_lines(mid.ts)
+    touch = None
+    for p, lab in main_lab:
+        if lab is None or lab.name != want:
+            continue
+        up, lo = lines(p.ts)
         if up is None:
             continue
-        if side == "long":
-            # 1) the middle HIGH touches the box HIGH (± the box's ATR) —
-            #    a mid that is merely an equal-high to the previous pivot of
-            #    this timeframe is a middle pivot, not the box top (XPL:
-            #    15m mid 0.11262 vs box 0.121 -> 7% away -> no touch -> no
-            #    alert), while the 1H's own 0.121 sits on the line.
-            if abs(mid.price - up) > touch_atr:
-                continue
-            # 2) the confirmed LOW sits on/above the box LOW line — judged
-            #    against the box, not against the previous low (XPL 1H:
-            #    0.10976 == the line at that bar -> higher low, whereas the
-            #    neighbour label said EL and blocked it).
-            _, lo2 = box_lines(second.ts)
-            if lo2 is None or second.price + abs(lo2) * LINE_EPS_REL < lo2:
-                continue
-            mid_label = "EH"
-        else:
-            # 1) the middle LOW touches the box LOW
-            if abs(mid.price - lo) > touch_atr:
-                continue
-            # 2) the confirmed HIGH sits on/below the box HIGH line
-            up2, _ = box_lines(second.ts)
-            if up2 is None or second.price - abs(up2) * LINE_EPS_REL > up2:
-                continue
-            mid_label = "EL"
+        side_line = up if side == "long" else lo
+        if abs(p.price - side_line) <= touch_atr:
+            touch = p          # keep the LAST qualifying touch
+    if touch is None:
+        return None
 
-        conf = confirms.get(second.ts)
-        if conf is None:      # unreachable — feed_all only yields confirmed
+    # ── STEP 2: the confirming swing, main tf or lower tf ────────────────
+    hit: Optional[dict] = None
+    for tf, candles in scan:
+        if not candles or len(candles) < cfg.atr14_length + 6:
             continue
-        # Anchor test is on the CONFIRMATION, not the first swing (QNT case):
-        # the box's anchor sits between the pattern's swings, so gating on
-        # first.ts dropped a pattern that both completed and confirmed inside
-        # the box's life. The 12h freshness window bounds anything older.
-        if anchor_ts is not None and conf < anchor_ts:
-            continue
-        hit = {
-            "side": side,
-            "first_ts": first.ts,
-            "first_price": first.price,
-            "mid_ts": mid.ts,
-            "mid_price": mid.price,
-            "mid_label": mid_label,
-            "second_ts": second.ts,
-            "second_price": second.price,
-            "confirm_ts": conf,
-        }
-    return hit
+        pivots = _zigzag(candles, cfg)
+        a14 = atr_series(candles, cfg.atr14_length, cfg.atr14_method)
+        confirms = _confirm_map(candles, cfg)
+        idx = {c.ts: i for i, c in enumerate(candles)}
+        main_seq = tf == main_tf
+        last_main = main_pivots[-1] if main_pivots else None
+
+        for i, p in enumerate(pivots):
+            if p.ts <= touch.ts or p.ts not in idx:
+                continue
+            eq = a14[idx[p.ts]]
+            if eq is None or eq <= 0:
+                continue
+            up, lo = lines(p.ts)
+            if up is None or lo is None:
+                continue
+            if side == "long":
+                if p.is_high:
+                    continue
+                # higher than the box low, CLEARING the equality band
+                if not p.price > lo + eq:
+                    continue
+            else:
+                if not p.is_high:
+                    continue
+                # lower than the box high, CLEARING the equality band
+                if not p.price < up - eq:
+                    continue
+
+            # positional freshness of the touch (user rule 2026-09-27)
+            if main_seq:
+                # third must be the LAST main pivot, touch right before it
+                if last_main is None or last_main.ts != p.ts or i == 0:
+                    continue
+                if main_pivots[-2].ts != touch.ts:
+                    continue
+            else:
+                # the touch must still be the last main-tf pivot
+                if last_main is None or last_main.ts != touch.ts:
+                    continue
+
+            conf = confirms.get(p.ts)
+            if conf is None:
+                continue
+            if anchor_ts is not None and conf < anchor_ts:
+                continue
+            hit = {
+                "side": side,
+                "pattern_tf": tf,
+                "touch_ts": touch.ts,
+                "touch_price": touch.price,
+                "touch_label": want,
+                "first_ts": touch.ts,        # kept for chart/caption compat
+                "first_price": touch.price,
+                "mid_ts": touch.ts,          # the touch IS the mid pivot
+                "mid_price": touch.price,
+                "mid_label": want,
+                "second_ts": p.ts,
+                "second_price": p.price,
+                "confirm_ts": conf,
+            }
+        if hit is not None:
+            return hit     # preference order: lower tf first
+    return None
 
 
 def potential_lines(hit: dict, box_lo: Optional[float],
                     box_hi: Optional[float]) -> list:
     """Chart lines for the LOW-TF chart (user rule 2026-09-27): the box
-    boundary on the non-breaking side, the pattern's mid pivot — the last
-    low-TF high (LONG) / low (SHORT) — on the side being broken."""
+    boundary on the non-breaking side, the TOUCH pivot on the side being
+    broken."""
     if hit["side"] == "long":
         return [box_lo, hit["mid_price"]]
     return [hit["mid_price"], box_hi]

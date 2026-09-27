@@ -756,17 +756,35 @@ def test_potential_pass_runs_before_the_lifecycle_pass(cfg, monkeypatch):
 # (1.2xATR7) exceeds the whole move, while ATR14(close-only) stays small:
 # the third swing can only be taken on the LIVE route.
 
+def _eq_at(closes, idx):
+    """The REAL eq band at bar idx — Wilder-RMA ATR14, exactly what
+    find_potential multiplies (a plain mean mismatches and the tail
+    misses the gate)."""
+    from compression_detection.atr import atr_series
+    return atr_series(mk(closes), CFG.atr14_length, CFG.atr14_method)[idx]
+
+
 def _live_long_path(tail: str = "clear"):
-    """H0 -> L1 -> H1(touch) -> L2 106.5 (never zigzag-confirms) -> tail."""
+    """H0 -> L1 -> H1(touch) -> L2 106.5 (never zigzag-confirms) -> tail.
+
+    spread=1.0 pins ATR7(true-range) >= 2, so the zigzag confirm needs
+    close > lo2 + 2.4 — the tails always stay under that (live route only).
+    """
     hi0, hi1, lo2 = 110.1, 110.0, 106.5
-    path = (_line(100, hi0, 12) + _line(hi0, 100, 12) +
+    base = (_line(100, hi0, 12) + _line(hi0, 100, 12) +
             _line(100, hi1, 12) + _line(hi1, lo2, 8))
+    eq = _eq_at(base, len(base) - 1)
     if tail == "clear":
-        path += _line(lo2, 107.6, 6)        # close > lo2+eq, < lo2+1.2*ATR7
+        # clears LIVE_CLEAR_ATR(1.75) x eq with margin, stays < lo2+2.0
+        target = min(lo2 + 1.75 * eq + 0.1, lo2 + 2.0)
+        path = base + _line(lo2, target, 6)
+    elif tail == "dip":
+        # past 1x eq but short of 1.75x — held by the clear gate alone
+        path = base + _line(lo2, lo2 + 1.4 * eq, 6)
     elif tail == "flat":
-        path += _line(lo2, lo2 + 0.05, 6)   # never clears lo2+eq
+        path = base + _line(lo2, lo2 + 0.05, 6)
     else:                                    # below the box band
-        path += _line(99.0, 100.6, 6)
+        path = base + _line(99.0, 100.6, 6)
     return mk(path, spread=1.0)
 
 
@@ -796,9 +814,11 @@ def test_live_third_below_the_box_band_rejected():
 def test_live_third_short_mirror_fires():
     from compression_detection.potential_break import _zigzag
     lo0, hi1, lo1, hi2 = 99.8, 105.0, 100.0, 104.0
-    path = (_line(110, lo0, 12) + _line(lo0, hi1, 12) +
-            _line(hi1, lo1, 12) + _line(lo1, hi2, 8) +
-            _line(hi2, 102.8, 6))            # close < hi2-eq, never zigzag
+    base = (_line(110, lo0, 12) + _line(lo0, hi1, 12) +
+            _line(hi1, lo1, 12) + _line(lo1, hi2, 8))
+    eq = _eq_at(base, len(base) - 1)
+    # clears 1.75*eq + margin below hi2, stays above hi2 - 2.4 (no zigzag)
+    path = base + _line(hi2, hi2 - min(1.75 * eq + 0.1, 2.0), 6)
     candles = mk(path, spread=1.0)
     assert all(abs(p.price - hi2) > 1e-9 for p in _zigzag(candles, CFG))
     hit = fp(candles, "short")
@@ -819,3 +839,14 @@ def test_live_third_requires_the_touch_to_be_the_last_main_pivot():
             _line(104.5, 105.6, 6))                       # clears, not confirm
     candles = mk(path, spread=1.0)
     assert fp(candles, "long") is None
+
+
+def test_live_dip_past_1x_but_short_of_the_clear_gate_is_held(monkeypatch):
+    """The clear gate (LIVE_CLEAR_ATR = 1.75, user choice 2026-09-27,
+    EIGEN/XLM case) is the ONLY reason this 1.4x dip doesn't alert: at
+    1x the same path fires."""
+    from compression_detection import potential_break as pb
+    candles = _live_long_path(tail="dip")
+    assert fp(candles, "long") is None
+    monkeypatch.setattr(pb, "LIVE_CLEAR_ATR", 1.0)
+    assert fp(candles, "long") is not None

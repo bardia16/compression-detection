@@ -27,11 +27,12 @@ STEP 2 has two confirmation routes (loosened 2026-09-27, PENDLE case):
       inflated by earlier volatility it can exceed the whole box height,
       so a valid higher low only "confirms" ON the breakout candle and
       `_drop_moot_potential` eats the alert. Accept the UNCONFIRMED
-      extreme instead once a CLOSE clears it by the eq band (ATR14 — the
-      same band STEP 2 measures with); `confirm_ts` is that clearing
-      candle. Positional freshness: the touch must still be the LAST
-      confirmed main-tf pivot. A confirmed hit always wins when both
-      qualify.
+      extreme instead once a CLOSE has displaced LIVE_CLEAR_ATR (1.75,
+      user choice 2026-09-27 EIGEN/XLM: 1x fired on the first chop) x
+      ATR14 of the swing bar beyond it in the potential direction;
+      `confirm_ts` is that candle. Positional freshness: the touch must
+      still be the LAST confirmed main-tf pivot. A confirmed hit always
+      wins when both qualify.
 
 Why the shape changed (XPL/PIEVERSE, 2026-09-27): the earlier
 "mid touches the line, third sits on the other line" rule compared nothing
@@ -63,6 +64,16 @@ POTENTIAL_FRESH_S = 12 * 3600
 # float slack for comparisons against a line value (a line fitted through
 # the pivot differs from the pivot price by ~1e-17).
 LINE_EPS_REL = 1e-9
+
+# Displacement the close must show beyond the LIVE third swing in the
+# potential direction before the alert means anything (user choice
+# 2026-09-27, EIGEN/XLM case: the first dip past 1x eq fired while price
+# kept chopping — "the price should still move a bit in the potential
+# direction"). 1.75 x ATR14 of the swing bar: blocks EIGEN (1.58x) and
+# XLM (1.52x), keeps PENDLE (budget 1.92x) firing pre-breakout, and sits
+# at zigzag-grade displacement so the confirmed route can't bypass it
+# with a smaller move. Confirmed-route alerts keep the original spec.
+LIVE_CLEAR_ATR = 1.75
 
 
 def _confirm_map(candles: List[Candle], cfg) -> Dict[int, int]:
@@ -235,11 +246,12 @@ def find_potential(side: str,
                                        and live.price < up_l - eq_l)
                     if band_ok:
                         confirm_ts = None
+                        clear = LIVE_CLEAR_ATR * eq_l
                         for c in candles[idx[live.ts]:]:
-                            if side == "long" and c.close > live.price + eq_l:
+                            if side == "long" and c.close > live.price + clear:
                                 confirm_ts = c.ts
                                 break
-                            if side == "short" and c.close < live.price - eq_l:
+                            if side == "short" and c.close < live.price - clear:
                                 confirm_ts = c.ts
                                 break
                         if confirm_ts is not None and (

@@ -458,3 +458,64 @@ def test_notified_defaults_when_state_has_no_flags():
     d["notified"] = {}
     back = type(inst).from_dict(d)
     assert back.notified == {"compression": False, "breakout": False}
+
+
+# ── direction label on the SECOND swing (user 2026-09-27, QNT case) ───
+def test_rejects_second_low_that_is_only_equal():
+    """A second low that is numerically higher but inside the ±ATR14
+    equality band is labeled EL, NOT HL — that is not a higher low.
+    (QNT: 180.06 < 181.25 at 0.32x ATR14 -> labeled EH, so the 'lower
+    high' the alert claimed did not exist.)"""
+    # L1=100, L2=100.5 -> |Δ|=0.5 <= ATR14 (~0.84) -> EL
+    path = (_line(100, 110.1, 12) + _line(110.1, 100, 12) +
+            _line(100, 110, 12) + _line(110, 100.5, 8) +
+            _line(100.5, 120, 12))
+    from compression_detection.zigzag import ZigZag
+    from compression_detection.atr import atr_series
+    from compression_detection.dow import label_all_pivots
+    candles = mk(path)
+    lab = label_all_pivots(
+        ZigZag(coef=1.2, atr_length=7).feed_all(candles),
+        atr_series(candles, 14, "close_only"))
+    lows = [(p.price, l.name if l else None) for p, l in lab if not p.is_high]
+    assert lows[-1][1] == "EL", f"fixture must end on an EL, got {lows}"
+    assert find_potential(candles, "long", CFG) is None
+
+
+def test_rejects_second_high_that_is_only_equal():
+    """Mirror: second high numerically lower but within ATR14 -> EH."""
+    path = (_line(110, 100, 12) + _line(100, 110, 12) +
+            _line(110, 100.1, 12) + _line(100.1, 109.5, 8) +
+            _line(109.5, 90, 12))
+    from compression_detection.zigzag import ZigZag
+    from compression_detection.atr import atr_series
+    from compression_detection.dow import label_all_pivots
+    candles = mk(path)
+    lab = label_all_pivots(
+        ZigZag(coef=1.2, atr_length=7).feed_all(candles),
+        atr_series(candles, 14, "close_only"))
+    highs = [(p.price, l.name if l else None) for p, l in lab if p.is_high]
+    assert highs[-1][1] == "EH", f"fixture must end on an EH, got {highs}"
+    assert find_potential(candles, "short", CFG) is None
+
+
+# ── dispatch order: the compression anchor goes first (QNT 2026-09-27) ─
+def test_compression_dispatches_before_potential_break():
+    """The box confirmation is the message every other alert threads onto;
+    best_per_coin_tf must emit it BEFORE passthrough actions, otherwise a
+    potential break can post first with no reply target (QNT: potential at
+    10:01:46, its own compression at 10:01:48)."""
+    from compression_detection.lifecycle import Action, best_per_coin_tf
+    inst = _inst()
+    acts = [Action("potential_break", inst, {"side": "short"}),
+            Action("compression_notify", inst, {}),
+            Action("breakout_post", inst, {})]
+    out = best_per_coin_tf(acts, cfg_det_order())
+    kinds = [a.kind for a in out]
+    assert kinds[0] == "compression_notify", kinds
+    assert "potential_break" in kinds and "breakout_post" in kinds
+
+
+def cfg_det_order():
+    from compression_detection.config import Config
+    return Config.load().det.selection_order

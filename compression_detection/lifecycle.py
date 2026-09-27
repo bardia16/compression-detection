@@ -750,7 +750,7 @@ def best_per_coin_tf(actions: List[Action], order: Sequence[str]) -> List[Action
     """
     out: List[Action] = []
     best: Dict[tuple, Action] = {}
-    passthrough: List[Action] = []
+    passthrough: List[Action] = []  # every non-notify action
     for a in actions:
         if a.kind != "compression_notify":
             passthrough.append(a)
@@ -763,8 +763,13 @@ def best_per_coin_tf(actions: List[Action], order: Sequence[str]) -> List[Action
         cur = best.get(k)
         if cur is None or _notify_rank(a, order) < _notify_rank(cur, order):
             best[k] = a
-    out.extend(passthrough)
+    # the compression message is the ANCHOR everything else threads onto
+    # (breakout replies, potential break reply) — it must go out first.
+    # 2026-09-27 QNT case: passthrough-first let a potential break post 2s
+    # BEFORE its own box confirmation, so it had no reply target and landed
+    # in msg_ids[0] ahead of the compression.
     out.extend(best.values())
+    out.extend(passthrough)
     return out
 
 

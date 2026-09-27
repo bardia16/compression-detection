@@ -86,7 +86,7 @@ def find_potential(candles: List[Candle], side: str, cfg,
     for i in range(len(labeled) - 2):
         first, first_lab = labeled[i]
         mid, mid_lab = labeled[i + 1]
-        second, _ = labeled[i + 2]
+        second, second_lab = labeled[i + 2]
         if anchor_ts is not None and first.ts < anchor_ts:
             continue
         if mid_lab is None:
@@ -97,6 +97,13 @@ def find_potential(candles: List[Candle], side: str, cfg,
                 continue
             if mid_lab.name != "EH":
                 continue
+            # the second swing must be LABELED a higher low — a price that is
+            # merely numerically higher but inside the ±ATR14 equality band is
+            # an EL (equal low), not this pattern (user 2026-09-27, QNT case:
+            # 180.06 < 181.25 numerically but 0.32x ATR14 apart -> labeled EH,
+            # so there was no lower high at all).
+            if second_lab is None or second_lab.name != "HL":
+                continue
             if not second.price > first.price:
                 continue
         else:
@@ -104,6 +111,10 @@ def find_potential(candles: List[Candle], side: str, cfg,
             if not first.is_high or mid.is_high or not second.is_high:
                 continue
             if mid_lab.name != "EL":
+                continue
+            # ...and LABELED a lower high (EH inside the equality band is an
+            # equal high, which is not a lower high)
+            if second_lab is None or second_lab.name != "LH":
                 continue
             if not second.price < first.price:
                 continue

@@ -65,6 +65,16 @@ def detect_with_candles(entries, last_bar, candles, **cfg_over):
     )
 
 
+def detect_live(entries, live_entry, last_bar, **cfg_over):
+    """detect() with a LIVE final pivot (user rule 2026-09-27): the
+    unconfirmed zigzag extreme appended after the confirmed ones."""
+    cfg = DetectConfig(min_pivots=MIN_PIVOTS, **cfg_over)
+    labeled = entries_to_labeled(entries)
+    live = entries_to_labeled([live_entry])[-1]
+    return detect_candidates(labeled, atr_series(), TF_MS, last_bar, cfg,
+                             live=live)
+
+
 def types_of(cands):
     return [c.type for c in cands]
 
@@ -524,3 +534,99 @@ def test_skip_never_duplicates_and_keeps_strict():
     off_sigs = {tuple((r.ts, r.price) for r in c.refs) for c in off}
     assert len(on_sigs) == len(set(on_sigs))
     assert off_sigs <= set(on_sigs)
+
+
+# ── live final pivot (user rule 2026-09-27, AR case) ─────────────────────
+
+def test_live_final_hl_completes_ascending_triangle():
+    """AR: [low, high, HL, EH] confirmed + the final HL still LIVE —
+    the pattern completes without waiting out the confirm lag."""
+    cands = detect_live([
+        ("L", 90.0, 10, None),
+        ("H", 100.0, 14, None),
+        ("L", 93.0, 18, "HL"),
+        ("H", 100.4, 22, "EH"),
+    ], ("L", 96.0, 26, "HL"), last_bar=28)
+    assert TYPE_ASC_TRI in types_of(cands)
+    a = [c for c in cands if c.type == TYPE_ASC_TRI][0]
+    assert a.pivot_count == 5
+    assert a.refs[-1].is_live is True
+    assert a.upper_class == st.FLAT and a.lower_class == st.RISING
+
+
+def test_live_final_never_completes_a_box():
+    """Live-final windows are triangles-only: 3 confirmed + a live EL must
+    NOT yield the 4-pivot box."""
+    cands = detect_live([
+        ("H", 100.0, 10, None),
+        ("L", 90.0, 14, None),
+        ("H", 100.5, 18, "EH"),
+    ], ("L", 90.5, 22, "EL"), last_bar=24)
+    assert TYPE_BOX not in types_of(cands)
+    assert not any(c.refs[-1].is_live for c in cands)
+
+
+def test_confirmed_path_unchanged_when_live_is_none():
+    """Passing live=None must reproduce the strict detections exactly."""
+    entries = [
+        ("L", 90.0, 10, None),
+        ("H", 100.0, 14, None),
+        ("L", 93.0, 18, "HL"),
+        ("H", 100.4, 22, "EH"),
+        ("L", 96.0, 26, "HL"),
+    ]
+    with_live = detect_live(entries[:4], entries[4], last_bar=28)
+    strict = detect(entries, last_bar=28)
+    assert types_of(with_live) == types_of(strict)
+    assert TYPE_ASC_TRI in types_of(strict)
+
+
+def test_live_duplicate_of_confirmed_is_ignored():
+    """A provisional that IS already a confirmed pivot adds nothing."""
+    entries = [
+        ("L", 90.0, 10, None),
+        ("H", 100.0, 14, None),
+        ("L", 93.0, 18, "HL"),
+        ("H", 100.4, 22, "EH"),
+        ("L", 96.0, 26, "HL"),
+    ]
+    cands = detect_live(entries, entries[4], last_bar=28)
+    asc = [c for c in cands if c.type == TYPE_ASC_TRI]
+    assert asc and all(not c.refs[-1].is_live for c in asc)
+
+
+def test_relabel_preserves_the_live_flag():
+    """Middle-pivot skip rebuilds PivotRefs — the is_live marker must
+    survive, or a live-final window would be laundered as confirmed."""
+    from compression_detection.detector import _relabel_refs
+    refs = entries_to_labeled([
+        ("L", 90.0, 10, None),
+        ("H", 100.4, 30, "EH"),
+    ])
+    refs = [PivotRef(ts=p.ts, bar_index=p.bar_index, abs_bar=p.bar_index,
+                     price=p.price, is_high=p.is_high,
+                     label=l.value if l else None,
+                     is_live=(i == 1))
+            for i, (p, l) in enumerate(refs)]
+    out = _relabel_refs(refs, atr_series())
+    assert out[1].is_live is True and out[0].is_live is False
+
+
+def test_live_final_triangle_through_the_skip_path_keeps_is_live():
+    """AR's real shape: interior pivots make every strict window fail, so
+    the pattern only forms via middle-pivot skip — the live final HL must
+    still be flagged live there."""
+    cands = detect_live([
+        ("L", 90.0, 10, None),
+        ("H", 96.2, 14, "HH"),
+        ("L", 95.5, 18, "HL"),
+        ("H", 100.0, 22, "HH"),
+        ("L", 95.0, 26, "EL"),
+        ("H", 100.4, 30, "EH"),
+    ], ("L", 97.1, 34, "HL"), last_bar=36)
+    asc = [c for c in cands if c.type == TYPE_ASC_TRI]
+    assert asc, "skip path should complete the triangle"
+    assert asc[0].refs[-1].is_live is True
+    # any box here is confirmed-only (pre-existing detection), never live
+    assert all(not r.is_live for c in cands if c.type == TYPE_BOX
+               for r in c.refs)

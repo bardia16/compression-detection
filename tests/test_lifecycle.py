@@ -31,6 +31,7 @@ CFG = SimpleNamespace(
     catchup_max_candles=8,
     breakout_buffer_atr=0.0,
     notify_min_state="confirmed",
+    triangle_notify_near_atr=1.0,
     det=SimpleNamespace(selection_order=(
         TYPE_ASC_TRI, TYPE_DESC_TRI, TYPE_BOX)),
 )
@@ -513,10 +514,12 @@ def test_notify_holds_lower_priority_while_higher_surfaces():
     assert [a.kind for a in _maybe_notify(box, 2000, CFG, [box, tri])] == \
         ["compression_notify"]
 
-    # the higher type itself is never held
+    # the higher type itself is never held by siblings — only by the
+    # triangle proximity gate, so hand it a close at the flat side
     tri.state = STATE_CONFIRMED
     tri.notified["compression"] = False
-    assert [a.kind for a in _maybe_notify(tri, 2000, CFG, [box, tri])] == \
+    assert [a.kind for a in _maybe_notify(tri, 2000, CFG, [box, tri],
+                                          close=tri.last_high_price())] == \
         ["compression_notify"]
 
 
@@ -577,3 +580,61 @@ def test_out_of_universe_terminal_instances_untouched():
     instances = {inst.id: inst}
     out = retire_out_of_universe(instances, set(), 10_000, 8 * 3600)
     assert out == [] and inst.out_of_universe_since is None
+
+
+# ── triangle proximity gate (user rule 2026-09-27, AR case) ──────────────
+
+def test_triangle_notification_waits_for_price_near_flat_side():
+    """Confirmation alert only while price is within 1 ATR of the LAST
+    flat-side pivot (asc: last EH) — the final HL may be live, so
+    proximity to the top is what makes the pattern actionable."""
+    from compression_detection.lifecycle import _maybe_notify
+    ascc = mk_cand(TYPE_ASC_TRI, [
+        ref(10, 90.0, "L"), ref(14, 100.0, "H"),
+        ref(18, 94.0, "L", "HL"), ref(22, 100.5, "H", "EH"),
+    ])
+    tri = mk_instance(ascc)
+    tri.state = STATE_CONFIRMED
+    flat = tri.last_high_price()
+    atr = tri.atr
+    assert flat == 100.5 and atr > 0
+
+    # price far below the top -> HELD
+    assert _maybe_notify(tri, 2000, CFG, None, close=flat - 3 * atr) == []
+    # no close at all -> HELD (never alert blind)
+    assert _maybe_notify(tri, 2000, CFG, None, close=None) == []
+    # within 1 ATR of the last EH -> fires
+    assert [a.kind for a in _maybe_notify(tri, 2000, CFG, None,
+                                          close=flat - 0.5 * atr)] == \
+        ["compression_notify"]
+    # already above the flat side -> fires too
+    assert [a.kind for a in _maybe_notify(tri, 2000, CFG, None,
+                                          close=flat + 0.2 * atr)] == \
+        ["compression_notify"]
+
+
+def test_triangle_gate_does_not_apply_to_boxes():
+    from compression_detection.lifecycle import _maybe_notify
+    _, boxc = box_refs(n=4)
+    box = mk_instance(boxc)
+    box.state = STATE_CONFIRMED
+    # boxes have no proximity gate — they notify with no close at all
+    assert [a.kind for a in _maybe_notify(box, 2000, CFG, None, close=None)] == \
+        ["compression_notify"]
+
+
+def test_descending_triangle_gate_is_mirrored():
+    from compression_detection.lifecycle import _maybe_notify
+    descc = mk_cand(TYPE_DESC_TRI, [
+        ref(10, 100.0, "H"), ref(14, 90.0, "L"),
+        ref(18, 96.0, "H", "LH"), ref(22, 89.5, "L", "EL"),
+    ])
+    tri = mk_instance(descc)
+    tri.state = STATE_CONFIRMED
+    flat = tri.last_low_price()          # 89.5
+    atr = tri.atr
+    # price far ABOVE the floor -> held; near/below -> fires
+    assert _maybe_notify(tri, 2000, CFG, None, close=flat + 3 * atr) == []
+    assert [a.kind for a in _maybe_notify(tri, 2000, CFG, None,
+                                          close=flat + 0.5 * atr)] == \
+        ["compression_notify"]

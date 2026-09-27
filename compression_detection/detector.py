@@ -163,6 +163,10 @@ class PivotRef:
     price: float
     is_high: bool
     label: Optional[str]  # "HH"/"LH"/"EH"/"HL"/"LL"/"EL" or None
+    # Unconfirmed zigzag extreme completing a triangle (user rule
+    # 2026-09-27, AR case) — triangles only, never boxes; excluded from
+    # to_dict() so the persisted state format is unchanged.
+    is_live: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -268,6 +272,11 @@ def _check_window(
     cfg: DetectConfig,
     close_by_bar: Optional[Dict[int, float]] = None,
 ) -> Optional[Candidate]:
+    # Live-final windows are triangles-only (user rule 2026-09-27): the
+    # final HL/LH may be the unconfirmed zigzag extreme; everything else
+    # (boxes first) still requires confirmed pivots throughout.
+    if refs[-1].is_live and spec.name not in (TYPE_ASC_TRI, TYPE_DESC_TRI):
+        return None
     highs = [r for r in refs if r.is_high]
     lows = [r for r in refs if not r.is_high]
     if len(highs) < 2 or len(lows) < 2:
@@ -578,6 +587,7 @@ def _relabel_refs(
             ts=r.ts, bar_index=r.bar_index, abs_bar=r.abs_bar,
             price=r.price, is_high=r.is_high,
             label=(lbl.value if lbl is not None else None),
+            is_live=r.is_live,   # relabeling must not launder the live flag
         ))
     return out
 
@@ -589,6 +599,7 @@ def detect_candidates(
     last_closed_abs_bar: int,
     cfg: DetectConfig,
     candles: Optional[Sequence] = None,
+    live: Optional[Tuple[Pivot, Optional[PivotLabel]]] = None,
 ) -> List[Candidate]:
     """All valid candidates across all types and trailing window sizes.
 
@@ -598,10 +609,20 @@ def detect_candidates(
     (largest) valid windows rank first.
 
     `candles` (optional) enables the interior close-integrity check.
+
+    `live` (user rule 2026-09-27, AR case): the zigzag's UNCONFIRMED
+    extreme, appended as a final ref so a triangle's last HL/LH can
+    complete the pattern while the leg is still developing — AR's final
+    HL printed 04:00 but only confirmed at 07:00, delivering its
+    confirmation alert together with the breakout. `_check_window`
+    restricts live-final windows to triangles; boxes keep confirmed
+    pivots only.
     """
     refs: List[PivotRef] = []
+    confirmed_ts = set()
     for p, label in labeled:
         abs_bar = p.ts // tf_ms
+        confirmed_ts.add(p.ts)
         if abs_bar < last_closed_abs_bar - cfg.max_pivot_age_bars:
             continue
         refs.append(PivotRef(
@@ -609,14 +630,56 @@ def detect_candidates(
             price=p.price, is_high=p.is_high,
             label=label.value if label is not None else None,
         ))
-    if not refs:
+    live_ref: Optional[PivotRef] = None
+    if live is not None:
+        p, label = live
+        abs_bar = p.ts // tf_ms
+        if (p.ts not in confirmed_ts
+                and abs_bar >= last_closed_abs_bar - cfg.max_pivot_age_bars):
+            live_ref = PivotRef(
+                ts=p.ts, bar_index=p.bar_index, abs_bar=abs_bar,
+                price=p.price, is_high=p.is_high,
+                label=label.value if label is not None else None,
+                is_live=True,
+            )
+    if not refs and live_ref is None:
         return []
 
+    out = _windows_over(refs, atr14_series, tf_ms, cfg, candles)
+    if live_ref is not None:
+        # SECOND, DISJOINT pass: windows end-anchored at the LIVE pivot
+        # (triangles only — _check_window enforces it). The confirmed-only
+        # pass above is untouched, so boxes and established patterns behave
+        # exactly as before; this one only ADDS the early triangle.
+        seen = {(c.type, tuple((r.ts, r.price) for r in c.refs)) for c in out}
+        for cand in _windows_over(refs + [live_ref], atr14_series, tf_ms,
+                                  cfg, candles):
+            sig = (cand.type, tuple((r.ts, r.price) for r in cand.refs))
+            if sig not in seen:
+                seen.add(sig)
+                out.append(cand)
+    return rank_candidates(out, cfg.selection_order)
+
+
+def _windows_over(
+    refs: List[PivotRef],
+    atr14_series: List[Optional[float]],
+    tf_ms: int,
+    cfg: DetectConfig,
+    candles: Optional[Sequence] = None,
+) -> List[Candidate]:
+    """Strict windows end-anchored at refs[-1] + the middle-pivot skip pass.
+
+    Split out so detect_candidates can run it twice — once on confirmed
+    pivots (original behavior) and once with the live final pivot.
+    """
     close_by_bar: Optional[Dict[int, float]] = None
     if candles is not None:
         close_by_bar = {int(c.ts // tf_ms): float(c.close) for c in candles}
 
     out: List[Candidate] = []
+    if not refs:
+        return out
     for type_name in ALL_TYPES:
         spec = TYPE_SPECS[type_name]
         min_k = cfg.min_pivots[type_name]
@@ -650,4 +713,4 @@ def detect_candidates(
                 if cand is not None:
                     seen.add(sig)
                     out.append(cand)
-    return rank_candidates(out, cfg.selection_order)
+    return out

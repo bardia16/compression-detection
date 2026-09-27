@@ -135,10 +135,26 @@ class Engine:
         zz = ZigZag(coef=self.cfg.zigzag_coef, atr_length=self.cfg.zigzag_atr_length)
         pivots = zz.feed_all(candles)
         atr14 = atr_series(candles, self.cfg.atr14_length, self.cfg.atr14_method)
-        labeled = label_all_pivots(pivots, atr14)
         last_bar = candles[-1].ts // tf_ms
+        # Live last pivot (user rule 2026-09-27, AR case): hand the
+        # detector the UNCONFIRMED zigzag extreme as a candidate final
+        # pivot so a triangle completes while the leg develops instead of
+        # waiting out the confirm lag (AR: HL 04:00 -> confirm 07:00, its
+        # confirmation landing on top of the breakout). Labels are computed
+        # on the extended list — earlier labels are prefix-stable — and the
+        # detector restricts live-final windows to asc/desc triangles.
+        full = pivots
+        live = None
+        prov = zz.provisional
+        if prov is not None and pivots and prov.ts not in {p.ts for p in pivots}:
+            full = pivots + [prov]
+        full_labeled = label_all_pivots(full, atr14)
+        if len(full_labeled) > len(pivots):
+            live, labeled = full_labeled[-1], full_labeled[:-1]
+        else:
+            labeled = full_labeled
         cands = detect_candidates(labeled, atr14, tf_ms, last_bar, self.cfg.det,
-                                  candles=candles)
+                                  candles=candles, live=live)
         return {"candles": candles, "pivots": pivots, "labeled": labeled,
                 "candidates": cands, "last_bar": last_bar}
 

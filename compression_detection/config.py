@@ -37,6 +37,11 @@ class Config:
     chart_url: str
     state_path: Path
     prune_after_days: int
+    # Triangle confirmation gate (user rule 2026-09-27, AR case): the alert
+    # fires only while price is within this many ATR of the LAST flat-side
+    # pivot (asc: last EH, desc: last EL) — the pattern's final HL/LH may be
+    # LIVE, so proximity to the flat side is what makes it actionable.
+    triangle_notify_near_atr: float = 1.0
 
     # convenience delegates (lifecycle reads these off the config object)
     @property
@@ -113,4 +118,6 @@ class Config:
             chart_url=str(notif["chart_url"]),
             state_path=Path(state["path"]),
             prune_after_days=int(state["prune_after_days"]),
+            triangle_notify_near_atr=float(
+                notif.get("triangle_notify_near_atr", 1.0)),
         )

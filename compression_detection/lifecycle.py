@@ -381,7 +381,8 @@ def _type_priority(type_name: str, order: Sequence[str]) -> int:
 
 
 def _maybe_notify(inst: Instance, now_s: int, cfg,
-                  siblings: Optional[Sequence[Instance]] = None) -> List[Action]:
+                  siblings: Optional[Sequence[Instance]] = None,
+                  close: Optional[float] = None) -> List[Action]:
     """Compression notification gate (once per instance).
 
     Type-priority rule (user rule 2026-09-19): when more than one
@@ -389,6 +390,14 @@ def _maybe_notify(inst: Instance, now_s: int, cfg,
     highest-priority type surfaces. A lower-priority notify is HELD while
     an already-notified, still-active higher-priority sibling exists; it
     retries on later scans and fires if that sibling ends first.
+
+    Triangle proximity gate (user rule 2026-09-27, AR case): a triangle's
+    final HL/LH may be the LIVE zigzag extreme (see detector), so the
+    confirmation alert waits until price presses the FLAT side — within
+    cfg.triangle_notify_near_atr x ATR of the LAST flat-side pivot (asc:
+    last EH, desc: last EL). Held, never consumed; retried every scan.
+    Boxes and wedges are unaffected. Without a close the gate cannot be
+    judged — hold rather than alert blind.
     """
     if inst.notified.get("compression"):
         return []
@@ -396,6 +405,16 @@ def _maybe_notify(inst: Instance, now_s: int, cfg,
         return []
     if state_rank(inst.state) < state_rank(cfg.notify_min_state):
         return []
+    if inst.type in ("ascending_triangle", "descending_triangle"):
+        flat = (inst.last_high_price() if inst.type == "ascending_triangle"
+                else inst.last_low_price())
+        if flat is None or not inst.atr or close is None:
+            return []
+        band = cfg.triangle_notify_near_atr * inst.atr
+        near = (close >= flat - band if inst.type == "ascending_triangle"
+                else close <= flat + band)
+        if not near:
+            return []
     if siblings:
         order = cfg.det.selection_order
         mine = _type_priority(inst.type, order)
@@ -581,6 +600,7 @@ def update_for_scan(
     actions: List[Action] = []
     symbol_tf = [i for i in instances.values() if i.symbol == symbol and i.tf == tf
                  and i.state in ACTIVE_STATES]
+    last_close = closed_candles[-1].close if closed_candles else None
 
     # 1) candle-close verdicts + breakout checks (boundary = pre-update)
     for inst in symbol_tf:
@@ -619,7 +639,8 @@ def update_for_scan(
             continue
         consumed.add(id(cand))
         actions.extend(_apply_candidate(inst, cand, now_s, cfg))
-        actions.extend(_maybe_notify(inst, now_s, cfg, symbol_tf))
+        actions.extend(_maybe_notify(inst, now_s, cfg, symbol_tf,
+                                     close=last_close))
 
     # 3) new instances from unmatched candidates (with already-broken guard)
     skipped_types: set = set()
@@ -671,7 +692,8 @@ def update_for_scan(
             continue
         sibs = [i for i in instances.values()
                 if i.symbol == symbol and i.tf == tf]
-        actions.extend(_maybe_notify(inst, now_s, cfg, sibs))
+        actions.extend(_maybe_notify(inst, now_s, cfg, sibs,
+                                     close=last_close))
 
     return actions
 

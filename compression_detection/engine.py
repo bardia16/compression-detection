@@ -292,6 +292,21 @@ class Engine:
         for inst in list(instances.values()):
             if inst.type != "box" or inst.state in TERMINAL_STATES:
                 continue
+            # The box's boundary lines are the ONLY reference the pattern is
+            # judged against (user rule 2026-09-27, XPL case). Lines live in
+            # the BOX tf's bar space; a stored pivot carries both ts and bar,
+            # so bar(ts) = ref_bar + (ts - ref_ts) / tf_ms lets us evaluate
+            # them for the scanned tf too. No lines -> no pattern.
+            ref = inst.pivots[0] if inst.pivots else None
+            tf_ms = TF_MS.get(inst.tf)
+            if ref is None or not tf_ms or ref.get("bar") is None:
+                continue
+
+            def box_at(ts, _ref=ref, _ms=tf_ms, _u=inst.upper_line,
+                       _l=inst.lower_line):
+                bar = _ref["bar"] + (ts - _ref["ts"]) / _ms
+                return (_u.at(bar), _l.at(bar))
+
             for side in ("long", "short"):
                 if inst.notified.get(f"potential_{side}"):
                     continue
@@ -302,7 +317,9 @@ class Engine:
                     if not candles:
                         continue
                     hit = find_potential(candles, side, self.cfg,
-                                         anchor_ts=inst.anchor_ts)
+                                         anchor_ts=inst.anchor_ts,
+                                         box_at=box_at,
+                                         touch_atr=inst.atr)
                     if hit is None:
                         continue
                     # freshness window (user choice 2026-09-27): a

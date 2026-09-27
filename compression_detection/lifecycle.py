@@ -272,6 +272,18 @@ class Instance:
             "out_of_universe_since": self.out_of_universe_since,
         }
 
+    @staticmethod
+    def _notified_from(d: dict) -> dict:
+        """Restore every notification flag — not just the two the class was
+        born with (2026-09-27: potential_long/potential_short were written
+        by to_dict but dropped here, so each engine restart re-fired the
+        alerts it had already sent). Unknown keys are kept: to_dict is the
+        authority on what exists."""
+        out = {k: bool(v) for k, v in (d.get("notified") or {}).items()}
+        out.setdefault("compression", False)
+        out.setdefault("breakout", False)
+        return out
+
     @classmethod
     def from_dict(cls, d: dict) -> "Instance":
         def _line(x):
@@ -285,8 +297,11 @@ class Instance:
             upper_line=_line(d.get("upper") or {}), lower_line=_line(d.get("lower") or {}),
             atr=d.get("atr", 0.0), upper_class=d.get("upper_class", st.FLAT),
             lower_class=d.get("lower_class", st.FLAT), metrics=dict(d.get("metrics") or {}),
-            notified={"compression": bool((d.get("notified") or {}).get("compression")),
-                      "breakout": bool((d.get("notified") or {}).get("breakout"))},
+            # every flag survives a restart, not just the two the class was
+            # born with (2026-09-27: potential_long/potential_short were
+            # written by to_dict but dropped here, so each restart re-fired
+            # the alerts it had already sent)
+            notified=cls._notified_from(d),
             msg_ids=list(d.get("msg_ids") or []),
             dm_msg_ids=list(d.get("dm_msg_ids") or []),
             probe_msg_id_dm=d.get("probe_msg_id_dm"),

@@ -434,3 +434,27 @@ def test_stale_low_tf_falls_through_to_fresh_main(cfg, monkeypatch):
     longs = [a for a in acts if a.detail["side"] == "long"]
     assert len(longs) == 1
     assert longs[0].detail["pattern_tf"] == "1h"
+
+
+# ── state round-trip (the restart-duplicate bug) ───────────────────────
+def test_all_notified_flags_survive_state_round_trip():
+    """to_dict/from_dict must keep every flag.
+
+    Regression: from_dict rebuilt `notified` from only compression/breakout,
+    so each engine restart dropped potential_long/potential_short and
+    re-fired alerts it had already posted (5 duplicates on 2026-09-27)."""
+    inst = _inst(notified={"compression": True, "breakout": False,
+                           "potential_long": True, "potential_short": False})
+    back = type(inst).from_dict(inst.to_dict())
+    assert back.notified["potential_long"] is True
+    assert back.notified["potential_short"] is False
+    assert back.notified["compression"] is True
+    assert back.notified["breakout"] is False
+
+
+def test_notified_defaults_when_state_has_no_flags():
+    inst = _inst()
+    d = inst.to_dict()
+    d["notified"] = {}
+    back = type(inst).from_dict(d)
+    assert back.notified == {"compression": False, "breakout": False}

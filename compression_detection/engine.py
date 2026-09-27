@@ -41,6 +41,9 @@ from .lifecycle import (
     ACTIVE_STATES, TERMINAL_STATES, Action, Instance, alert_level_for,
     best_per_coin_tf, retire_out_of_universe, update_for_scan,
 )
+from .potential_break import (
+    LOWER_TF, POTENTIAL_FRESH_S, find_potential, potential_lines,
+)
 from .report import build_summary, format_summary_text, write_report
 from .timing import next_scan_ms, probe_due
 from .zigzag import ZigZag
@@ -221,6 +224,13 @@ class Engine:
                             "candidates": [c.to_dict() for c in r["candidates"][:8]],
                         })
 
+            # potential-break confirmation (user rule 2026-09-27): every
+            # active BOX is checked on its own TF and one TF down, for a
+            # low → EH → higher low / high → EL → lower high that a close
+            # just confirmed.
+            raw_actions.extend(self._potential_actions(instances_src,
+                                                       candles_by_key, now_s))
+
             if self.cfg.best_only_per_coin_tf:
                 raw_actions = best_per_coin_tf(raw_actions,
                                                self.cfg.det.selection_order)
@@ -243,6 +253,52 @@ class Engine:
             self._prune()
             self._save_state()
         return {"summary": summary, "report": str(path)}
+
+    # ── potential break ─────────────────────────────────────────────────
+    def _potential_actions(self, instances, candles_by_key: Dict[tuple, list],
+                           now_s: int) -> List[Action]:
+        """Potential-break pattern pass (user rule 2026-09-27).
+
+        Active BOXES only. Per side: the box's OWN tf and the TF below it
+        are both probed, LOW TF FIRST — when a scan sees the pattern on
+        both, the low-TF one wins because its alert carries both charts
+        (the low-TF chart is the one with the pattern detail). The flag is
+        written at EMIT time, the same contract the breakout verdict uses,
+        so a scan can never re-arm an alert already in flight.
+
+        Returns at most one action per instance per side.
+        """
+        out: List[Action] = []
+        for inst in list(instances.values()):
+            if inst.type != "box" or inst.state in TERMINAL_STATES:
+                continue
+            for side in ("long", "short"):
+                if inst.notified.get(f"potential_{side}"):
+                    continue
+                for tf in (LOWER_TF.get(inst.tf), inst.tf):
+                    if not tf:
+                        continue
+                    candles = candles_by_key.get((inst.symbol, tf))
+                    if not candles:
+                        continue
+                    hit = find_potential(candles, side, self.cfg,
+                                         anchor_ts=inst.anchor_ts)
+                    if hit is None:
+                        continue
+                    # freshness window (user choice 2026-09-27): a
+                    # confirmation older than 12h is old news — skip it and
+                    # keep looking (the main TF may hold a fresh one).
+                    if hit["confirm_ts"] < (now_s - POTENTIAL_FRESH_S) * 1000:
+                        continue
+                    inst.notified[f"potential_{side}"] = True
+                    inst.add_event("potential", now_s, side=side, pattern_tf=tf,
+                                   mid=hit["mid_price"],
+                                   second=hit["second_price"],
+                                   confirm_ts=hit["confirm_ts"])
+                    out.append(Action("potential_break", inst,
+                                      {"pattern_tf": tf, **hit}))
+                    break       # one alert per side
+        return out
 
     # ── dispatch ───────────────────────────────────────────────────────
     async def _dispatch(self, raw_actions: List, ses,
@@ -341,6 +397,65 @@ class Engine:
                                   "side": detail.get("side"), "msg_id": mid,
                                   "reply_to": reply_to, "chart": img is not None})
 
+            elif kind == "potential_break":
+                detail = a.detail
+                if not self.cfg.notif_enabled or self.dry_run or self.tg is None:
+                    self.audit.write({"event": "notify_suppressed", "kind": kind,
+                                      "id": inst.id, "side": detail.get("side"),
+                                      "dry": self.dry_run})
+                    continue
+                side = detail["side"]
+                ptf = detail["pattern_tf"]
+                # same candle-health gate as every other post (2026-09-16)
+                candles = candles_by_key.get((inst.symbol, inst.tf)) or []
+                if has_candle_problems(candles):
+                    self.audit.write({"event": "candle_problems", "kind": kind,
+                                      "id": inst.id, "side": side,
+                                      "action": "suppress"})
+                    continue
+                caption = nt.fmt_potential(inst, side, ptf, detail)
+                sub = f"🎯 {nt.tf_label(ptf)} pattern chart"
+                # chart 1 — MAIN TF: the structure's own boundaries, exactly
+                # what its compression alert drew (context for the pattern).
+                if inst.type == "box":
+                    main_lines = [inst.last_low_price(), inst.last_high_price()]
+                    main_segs = None
+                else:
+                    x2 = ((candles[-1].ts + TF_MS[inst.tf]) if candles
+                          else inst.pivots[-1]["ts"])
+                    main_lines, main_segs = [], inst.trend_segments(
+                        TF_MS[inst.tf], x2)
+                imgs: List[bytes] = []
+                if img := await self._chart(ses, inst, main_lines, main_segs):
+                    imgs.append(img)
+                # chart 2 — LOW TF (user rule 2026-09-27): only when the
+                # pattern was found there; box boundaries drawn, with the
+                # breaking side adjusted to the pattern's mid pivot — the
+                # LAST low-TF high (long) / low (short).
+                if ptf != inst.tf and inst.type == "box":
+                    low_lines = potential_lines(detail, inst.last_low_price(),
+                                                inst.last_high_price())
+                    if img2 := await self._chart(ses, inst, low_lines, None,
+                                                 tf=ptf):
+                        imgs.append(img2)
+                # replies onto the box confirmation message (2026-09-16 rule)
+                reply_to = inst.msg_ids[0] if inst.msg_ids else None
+                mid = await self._post_photos(caption, sub, imgs, reply_to)
+                if mid is not None:
+                    inst.msg_ids.append(mid)
+                    dmid = await self._dm_post(
+                        inst, kind, caption, imgs=imgs, sub_caption=sub,
+                        reply_to_dm=inst.dm_msg_ids[0] if inst.dm_msg_ids else None,
+                        force=True)     # every potential break also to the DM
+                    if dmid is not None:
+                        inst.dm_msg_ids.append(dmid)
+                sends.append({"kind": kind, "id": inst.id, "msg_id": mid,
+                              "side": side, "pattern_tf": ptf})
+                self.audit.write({"event": "post", "kind": kind, "id": inst.id,
+                                  "msg_id": mid, "side": side,
+                                  "pattern_tf": ptf, "charts": len(imgs),
+                                  "reply_to": reply_to})
+
             elif kind == "breakout_keep":
                 inst.probe_msg_id_dm = None   # mirrored heads-up is kept too
                 self.audit.write({"event": "breakout_confirmed", "id": inst.id,
@@ -369,43 +484,68 @@ class Engine:
         return sends
 
     async def _chart(self, ses, inst: Instance, lines: List[float],
-                     trend_lines: Optional[List[tuple]] = None) -> Optional[bytes]:
+                     trend_lines: Optional[List[tuple]] = None,
+                     tf: Optional[str] = None) -> Optional[bytes]:
+        """Alert chart. `tf` defaults to the instance's own TF — pass the
+        low TF for the potential-break pattern chart (user rule 2026-09-27)."""
         if self.dry_run:
             return None
+        tf = tf or inst.tf
         async with self._chart_sem:
             dt = time.time() - self._chart_last
             if dt < CHART_SPACING_S:
                 await asyncio.sleep(CHART_SPACING_S - dt)
             img = await nt.fetch_chart(ses, self.cfg.chart_url, inst.symbol,
-                                       inst.tf, lines, trend_lines)
+                                       tf, lines, trend_lines)
             if img is None:
                 # one retry before the text-only fallback
                 await asyncio.sleep(CHART_RETRY_DELAY_S)
                 img = await nt.fetch_chart(ses, self.cfg.chart_url, inst.symbol,
-                                           inst.tf, lines, trend_lines)
+                                           tf, lines, trend_lines)
             self._chart_last = time.time()
             return img
 
-    def _dm_mirror(self, inst: Instance) -> bool:
+    async def _post_photos(self, caption: str, sub_caption: str,
+                           imgs: List[bytes], reply_to: Optional[int],
+                           chat_id: Optional[str] = None) -> Optional[int]:
+        """Post a photo sequence: the first carries the caption, the rest a
+        short label. Text-only when nothing uploaded. Returns the id of the
+        FIRST message (that is the alert's id / reply anchor)."""
+        first: Optional[int] = None
+        if self.tg is None:
+            return None
+        for i, im in enumerate(imgs or []):
+            m = await self.tg.post_photo(caption if i == 0 else sub_caption,
+                                         im, reply_to_id=reply_to,
+                                         chat_id=chat_id)
+            if i == 0:
+                first = m
+        if first is None:
+            first = await self.tg.post(caption, reply_to_id=reply_to,
+                                       chat_id=chat_id)
+        return first
+
+    def _dm_mirror(self, inst: Instance, force: bool = False) -> bool:
         """True when this instance's alerts are also mirrored to the DM
-        (user rule 2026-09-20: ascending/descending triangles)."""
-        return bool(self.dm_chat) and inst.type in DM_MIRROR_TYPES
+        (user rule 2026-09-20: ascending/descending triangles;
+        2026-09-27: every potential-break alert, whatever the type)."""
+        return bool(self.dm_chat) and (force or inst.type in DM_MIRROR_TYPES)
 
     async def _dm_post(self, inst: Instance, kind: str, caption: str,
-                       img: Optional[bytes],
-                       reply_to_dm: Optional[int] = None) -> Optional[int]:
-        """Mirror one alert into the DM chat (chart included when fetched).
+                       img: Optional[bytes] = None,
+                       reply_to_dm: Optional[int] = None,
+                       imgs: Optional[List[bytes]] = None,
+                       sub_caption: str = "",
+                       force: bool = False) -> Optional[int]:
+        """Mirror one alert into the DM chat (chart(s) included when
+        fetched). `imgs` supersedes `img` for multi-chart alerts.
         Returns the DM message id, or None when mirroring is off/failed."""
-        if not self._dm_mirror(inst) or self.tg is None or self.dry_run:
+        if not self._dm_mirror(inst, force=force) or self.tg is None \
+                or self.dry_run:
             return None
-        dmid = None
-        if img is not None:
-            dmid = await self.tg.post_photo(caption, img,
-                                            reply_to_id=reply_to_dm,
-                                            chat_id=self.dm_chat)
-        if dmid is None:
-            dmid = await self.tg.post(caption, reply_to_id=reply_to_dm,
-                                      chat_id=self.dm_chat)
+        seq = imgs if imgs is not None else ([img] if img else [])
+        dmid = await self._post_photos(caption, sub_caption or caption, seq,
+                                       reply_to_dm, self.dm_chat)
         self.audit.write({"event": "dm_mirror", "kind": kind, "id": inst.id,
                           "msg_id": dmid})
         return dmid

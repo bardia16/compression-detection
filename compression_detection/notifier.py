@@ -74,6 +74,31 @@ def fmt_breakout(inst, side: str, level: float) -> str:
     )
 
 
+def fmt_potential(inst, side: str, pattern_tf: str, hit: dict) -> str:
+    """Potential-break confirmation (user rule 2026-09-27).
+
+    Three swings on `pattern_tf`: LOW → EH → HIGHER low (long) or
+    HIGH → EL → LOWER high (short); the third is only a pivot once a close
+    beyond coef × ATR7 confirms it, which is what this alert fires on.
+    `hit` comes from potential_break.find_potential — its `mid_price` is
+    the last low-TF high (long) / low (short), the line the low-TF chart
+    adjusts to.
+    """
+    arrow = "🟢" if side == "long" else "🔴"
+    word = "Long" if side == "long" else "Short"
+    if side == "long":
+        step = (f"{_fmt_price(hit['first_price'])} → EH {_fmt_price(hit['mid_price'])}"
+                f" → higher low {_fmt_price(hit['second_price'])} ✓")
+    else:
+        step = (f"{_fmt_price(hit['first_price'])} → EL {_fmt_price(hit['mid_price'])}"
+                f" → lower high {_fmt_price(hit['second_price'])} ✓")
+    return (
+        f"{arrow} <b>{inst.symbol}</b> — {tf_label(inst.tf)} Compression  ·  "
+        f"{word} Potential Break\n"
+        f"🎯 {tf_label(pattern_tf)} pattern · {step}"
+    )
+
+
 def chart_url(chart_base: str, symbol: str, tf: str,
               lines: Optional[List[float]] = None,
               trend_lines: Optional[List[tuple]] = None) -> str:

@@ -59,9 +59,9 @@ def find_potential(candles: List[Candle], side: str, cfg,
     """Latest matching pattern on ONE timeframe, or None.
 
     side      "long" | "short" — direction of the expected break
-    anchor_ts earliest pivot ts that counts (the compression's anchor):
-              a pattern that finished before this box existed is not
-              this box's signal.
+    anchor_ts the compression's anchor (first pivot ts): the pattern must
+              CONFIRM at or after it — a confirmation that predates the box
+              is not this box's signal.
 
     Returned dict carries every swing plus the confirming candle, so the
     engine can draw the chart lines without recomputing the zigzag.
@@ -87,8 +87,6 @@ def find_potential(candles: List[Candle], side: str, cfg,
         first, first_lab = labeled[i]
         mid, mid_lab = labeled[i + 1]
         second, second_lab = labeled[i + 2]
-        if anchor_ts is not None and first.ts < anchor_ts:
-            continue
         if mid_lab is None:
             continue
         if side == "long":
@@ -120,6 +118,14 @@ def find_potential(candles: List[Candle], side: str, cfg,
                 continue
         conf = confirms.get(second.ts)
         if conf is None:      # unreachable — feed_all only yields confirmed
+            continue
+        # Anchor test is on the CONFIRMATION, not the first swing (QNT case):
+        # the box's anchor sits between the pattern's swings (H 188.95 ->
+        # [anchor = EL 170.57] -> LH 181.25), so gating on first.ts dropped a
+        # pattern that both completed and confirmed inside the box's life.
+        # What matters is that the confirmation landed while the box existed;
+        # the 12h freshness window bounds anything older.
+        if anchor_ts is not None and conf < anchor_ts:
             continue
         hit = {
             "side": side,

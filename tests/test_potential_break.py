@@ -566,3 +566,18 @@ def test_drop_moot_on_breakout_kept_on_invalidate():
             eng_mod.Action("potential_break", replaced, {"side": "long"})]
     out = eng_mod.Engine._drop_moot_potential(acts)
     assert [a.instance.state for a in out] == ["invalidated"]
+
+
+def test_pattern_straddling_the_anchor_still_fires():
+    """QNT case: the box's anchor sits BETWEEN the pattern's swings, so
+    gating on first.ts would drop a pattern that both completed and
+    confirmed inside the box's life. The gate is on the CONFIRMATION."""
+    candles = mk(long_path())
+    hit = find_potential(candles, "long", CFG)
+    assert hit is not None
+    # anchor placed between first and mid -> still fires (conf > anchor)
+    midway = hit["first_ts"] + 1
+    assert find_potential(candles, "long", CFG, anchor_ts=midway) is not None
+    # anchor pushed past the confirmation -> suppressed
+    assert find_potential(candles, "long", CFG,
+                          anchor_ts=hit["confirm_ts"] + 1) is None

@@ -219,6 +219,27 @@ class Engine:
                         inst.probe_side = ""
                     raw_actions.append(Action("invalidate", inst,
                                               {"reason": "out_of_universe"}))
+            # Grace-fetch (user pick 2026-09-27, A): an ACTIVE instance whose
+            # coin left the LCW universe keeps FULL evaluation for its
+            # out-of-universe TTL window. Before this, pass A simply had no
+            # candles for it — probes still ran (independent fetch) but
+            # lifecycle/potential starved silently (HUMA/BANK/TLM case:
+            # qualified potentials never evaluated while the instance sat
+            # in grace). universe_syms above stays the TRUE universe, so
+            # the retire timer keeps ticking and TTL expiry still applies.
+            universe_n = len(pairs)
+            if not symbol_filter:
+                have = {p.split("/")[0] + "USDT" for p in pairs}
+                grace = sorted({i.symbol for i in instances_src.values()
+                                if i.state in ACTIVE_STATES
+                                and i.symbol not in have})
+                if grace:
+                    grace_pairs = [f"{s[:-4]}/USDT" for s in grace]
+                    pairs = pairs + grace_pairs
+                    results = list(results) + list(await asyncio.gather(
+                        *[self._fetch_coin(ses, sem, p) for p in grace_pairs]))
+                    log.info("grace-fetch: %d out-of-universe actives: %s",
+                             len(grace), ", ".join(grace))
             # pass A — materialize candles + detections. Split from the
             # lifecycle pass on purpose (user rule 2026-09-27): the
             # potential break must run while every box is still ALIVE, so a
@@ -277,7 +298,7 @@ class Engine:
                         "detail": a.detail}
                        for a in raw_actions]
 
-        summary = build_summary(now_ms, self.dry_run, len(pairs), errors,
+        summary = build_summary(now_ms, self.dry_run, universe_n, errors,
                                 actions, detections, instances_src, sends)
         path = write_report(REPORTS_DIR, now_ms, summary)
         log.info("scan done: %d instances, %d actions, %d sends -> %s",

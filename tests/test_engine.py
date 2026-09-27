@@ -288,3 +288,24 @@ def test_probe_confirmed_close_keeps_message(cfg, monkeypatch):
     d = json.loads(cfg.state_path.read_text())
     inst2 = list(d["instances"].values())[0]
     assert inst2["state"] == "breakout"
+
+
+def test_grace_fetch_evaluates_out_of_universe_actives(cfg, monkeypatch):
+    """Grace-fetch (user pick 2026-09-27, A): an ACTIVE instance whose coin
+    left the LCW universe keeps FULL evaluation for its TTL window — pass A
+    used to starve silently (HUMA/BANK/TLM: qualified potentials never ran
+    because no candles were fetched for the coin; only probes, which fetch
+    independently, kept working)."""
+    patch_env(monkeypatch, box_closes())
+    e, res = scan(cfg)
+    assert res["summary"]["universe_count"] == 1
+    assert res["summary"]["instances_active"] == 1
+
+    # the coin drops out of the universe (24h volume moved below the floor)
+    monkeypatch.setattr(uni, "get_universe", lambda *a, **kw: [])
+    e2, res2 = scan(cfg)
+    s = res2["summary"]
+    assert s["universe_count"] == 0            # truly out of the universe
+    assert s["instances_active"] == 1          # still inside its grace TTL
+    # ...and its candles were fetched + analyzed anyway:
+    assert any(d["symbol"] == "AAAUSDT" for d in s["detections"])

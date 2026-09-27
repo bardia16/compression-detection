@@ -38,8 +38,9 @@ from .detector import detect_candidates
 from .dow import label_all_pivots
 from .fetcher import TF_MS, fetch_klines, fetch_last_price
 from .lifecycle import (
-    ACTIVE_STATES, TERMINAL_STATES, Action, Instance, alert_level_for,
-    best_per_coin_tf, retire_out_of_universe, update_for_scan,
+    ACTIVE_STATES, STATE_BREAKOUT, TERMINAL_STATES, Action, Instance,
+    alert_level_for, best_per_coin_tf, order_potential,
+    retire_out_of_universe, update_for_scan,
 )
 from .potential_break import (
     LOWER_TF, POTENTIAL_FRESH_S, find_potential, potential_lines,
@@ -202,6 +203,11 @@ class Engine:
                         inst.probe_side = ""
                     raw_actions.append(Action("invalidate", inst,
                                               {"reason": "out_of_universe"}))
+            # pass A — materialize candles + detections. Split from the
+            # lifecycle pass on purpose (user rule 2026-09-27): the
+            # potential break must run while every box is still ALIVE, so a
+            # box whose continuation pass is about to hand it over to an
+            # ascending/descending triangle still gets its alert out first.
             for pair, res in zip(pairs, results):
                 # store the full Binance symbol (ORCAUSDT) — messages, charts,
                 # probe fetches and ticker calls all need it (bare ORCA broke
@@ -213,27 +219,41 @@ class Engine:
                         errors.append(f"{sym}:{tf} no data")
                         continue
                     candles_by_key[(sym, tf)] = r["candles"]
-                    acts = update_for_scan(
-                        instances_src, sym, tf, r["candidates"], r["candles"],
-                        TF_MS[tf], now_s, self.cfg,
-                    )
-                    raw_actions.extend(acts)
                     if r["candidates"]:
                         detections.append({
                             "symbol": sym, "tf": tf,
                             "candidates": [c.to_dict() for c in r["candidates"][:8]],
                         })
 
-            # potential-break confirmation (user rule 2026-09-27): every
-            # active BOX is checked on its own TF and one TF down, for a
-            # low → EH → higher low / high → EL → lower high that a close
-            # just confirmed.
+            # pass B — potential break (boxes still alive): low → EH →
+            # confirmed higher low / high → EL → confirmed lower high on the
+            # box's own TF and one TF down.
             raw_actions.extend(self._potential_actions(instances_src,
                                                        candles_by_key, now_s))
+
+            # pass C — lifecycle: close verdicts, continuation/invalidation,
+            # new instances (this is where a triangle replaces the box).
+            for pair, res in zip(pairs, results):
+                sym = pair.split("/")[0] + "USDT"
+                for tf in self.cfg.timeframes:
+                    r = res.get(tf)
+                    if r is None:
+                        continue
+                    raw_actions.extend(update_for_scan(
+                        instances_src, sym, tf, r["candidates"], r["candles"],
+                        TF_MS[tf], now_s, self.cfg,
+                    ))
+
+            # a box that reached BREAKOUT in this very scan already resolved —
+            # announcing its 'potential' break one action later is noise
+            raw_actions = self._drop_moot_potential(raw_actions)
 
             if self.cfg.best_only_per_coin_tf:
                 raw_actions = best_per_coin_tf(raw_actions,
                                                self.cfg.det.selection_order)
+            # potential break AFTER its own box's compression, BEFORE the
+            # triangle that replaces that box
+            raw_actions = order_potential(raw_actions)
 
             sends = await self._dispatch(raw_actions, ses, candles_by_key)
             actions = [{"kind": a.kind,
@@ -299,6 +319,17 @@ class Engine:
                                       {"pattern_tf": tf, **hit}))
                     break       # one alert per side
         return out
+
+    @staticmethod
+    def _drop_moot_potential(raw_actions: List[Action]) -> List[Action]:
+        """Drop potential breaks for structures that reached BREAKOUT in the
+        same scan — the structure already resolved, so a 'potential break'
+        one action later is stale noise. INVALIDATED instances are KEPT: that
+        is the box -> triangle handover (user rule 2026-09-27), whose
+        potential break must go out before the replacement pattern."""
+        return [a for a in raw_actions
+                if not (a.kind == "potential_break" and a.instance is not None
+                        and a.instance.state == STATE_BREAKOUT)]
 
     # ── dispatch ───────────────────────────────────────────────────────
     async def _dispatch(self, raw_actions: List, ses,

@@ -773,6 +773,35 @@ def best_per_coin_tf(actions: List[Action], order: Sequence[str]) -> List[Action
     return out
 
 
+def order_potential(actions: List[Action]) -> List[Action]:
+    """Dispatch order for a scan carrying potential breaks (user rule
+    2026-09-27).
+
+    A potential break threads onto ITS OWN box's compression, so when that
+    box's compression lands in the same scan it must go out first (the QNT
+    case). Everything else follows — including a REPLACEMENT triangle's
+    compression — so a potential break always precedes the pattern that
+    replaces the box (the box -> ascending/descending triangle handover,
+    where the user says a potential break is always present)."""
+    pot_idx = {i for i, a in enumerate(actions)
+               if a.kind == "potential_break" and a.instance is not None}
+    if not pot_idx:
+        return actions
+    owners = {actions[i].instance.id for i in pot_idx}
+    anchors: List[Action] = []
+    pots: List[Action] = []
+    rest: List[Action] = []
+    for i, a in enumerate(actions):
+        if i in pot_idx:
+            pots.append(a)
+        elif (a.kind == "compression_notify" and a.instance is not None
+              and a.instance.id in owners):
+            anchors.append(a)
+        else:
+            rest.append(a)
+    return anchors + pots + rest
+
+
 def _notify_rank(a: Action, order: Sequence[str]) -> tuple:
     i = a.instance
     if i is None:

@@ -519,3 +519,50 @@ def test_compression_dispatches_before_potential_break():
 def cfg_det_order():
     from compression_detection.config import Config
     return Config.load().det.selection_order
+
+
+# ── ordering around the box -> triangle handover (user rule 2026-09-27) ─
+def test_order_potential_puts_own_box_compression_first():
+    """QNT case: the box's compression and its potential break land in the
+    same scan — the compression (the reply anchor) must go out first."""
+    from compression_detection.lifecycle import Action, order_potential
+    box = _inst()
+    tri = _inst(type_="ascending_triangle", anchor=T0 + 60_000)
+    acts = [Action("potential_break", box, {"side": "short"}),
+            Action("compression_notify", box, {})]
+    out = order_potential(acts)
+    assert [a.kind for a in out] == ["compression_notify", "potential_break"]
+
+
+def test_order_potential_precedes_the_replacing_triangle():
+    """Handover case: the box's potential break must go out BEFORE the
+    ascending/descending triangle that replaces it, not after."""
+    from compression_detection.lifecycle import Action, order_potential
+    box = _inst()
+    tri = _inst(type_="ascending_triangle", anchor=T0 + 60_000)
+    acts = [Action("compression_notify", tri, {}),
+            Action("invalidate", box, {}),
+            Action("potential_break", box, {"side": "long"})]
+    out = order_potential(acts)
+    kinds = [a.kind for a in out]
+    assert kinds.index("potential_break") < kinds.index("compression_notify")
+    assert kinds.index("invalidate") > kinds.index("potential_break")
+
+
+def test_order_potential_noop_without_potential():
+    from compression_detection.lifecycle import Action, order_potential
+    a1 = Action("compression_notify", _inst(), {})
+    a2 = Action("breakout_post", _inst(), {})
+    assert order_potential([a1, a2]) == [a1, a2]
+
+
+def test_drop_moot_on_breakout_kept_on_invalidate():
+    """A box that broke out in the same scan has resolved — its potential
+    break is dropped. An invalidated box (the triangle handover) keeps it."""
+    import compression_detection.engine as eng_mod
+    broke = _inst(state=STATE_BREAKOUT)
+    replaced = _inst(state="invalidated")
+    acts = [eng_mod.Action("potential_break", broke, {"side": "long"}),
+            eng_mod.Action("potential_break", replaced, {"side": "long"})]
+    out = eng_mod.Engine._drop_moot_potential(acts)
+    assert [a.instance.state for a in out] == ["invalidated"]

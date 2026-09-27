@@ -581,3 +581,52 @@ def test_pattern_straddling_the_anchor_still_fires():
     # anchor pushed past the confirmation -> suppressed
     assert find_potential(candles, "long", CFG,
                           anchor_ts=hit["confirm_ts"] + 1) is None
+
+
+def test_dead_reply_target_does_not_swallow_the_alert(cfg, monkeypatch):
+    """A reply target deleted since it was recorded (QNT DM twin 2429)
+    makes Telegram 400 on every post. The alert must still go out — first
+    try with the reply, then without it."""
+    monkeypatch.setenv("TELEGRAM_DM_CHAT_ID", "5659605264")
+    monkeypatch.setattr(eng_mod, "has_candle_problems", lambda c: False)
+
+    async def fake_chart(self, ses, i, lines, trend_lines=None, tf=None):
+        return b"PNG"
+
+    monkeypatch.setattr(eng_mod.Engine, "_chart", fake_chart)
+
+    class FlakyTG(FakeTG):
+        """post_photo/post fail whenever a reply target is supplied."""
+        async def post_media_group(self, caption, images, reply_to_id=None,
+                                   chat_id=None):
+            if reply_to_id:
+                return None
+            return await super().post_media_group(caption, images,
+                                                  reply_to_id=None,
+                                                  chat_id=chat_id)
+
+        async def post_photo(self, caption, img, reply_to_id=None,
+                             chat_id=None):
+            if reply_to_id:
+                return None
+            return await super().post_photo(caption, img, reply_to_id=None,
+                                            chat_id=chat_id)
+
+        async def post(self, text, reply_to_id=None, chat_id=None):
+            if reply_to_id:
+                return None
+            return await super().post(text, reply_to_id=None, chat_id=chat_id)
+
+    tg = FlakyTG()
+    e = eng_mod.Engine(cfg, dry_run=False, tg=tg)
+    inst = _inst()
+    inst.msg_ids = [11]
+    hit = find_potential(mk(long_path()), "long", CFG)
+    actions = [eng_mod.Action("potential_break", inst,
+                              {"pattern_tf": "15m", **hit})]
+    sends = asyncio.run(e._dispatch(actions, None,
+                                    {(inst.symbol, inst.tf): mk(long_path()),
+                                     (inst.symbol, "15m"): mk(long_path())}))
+    # the alert went out (without the reply) instead of vanishing
+    assert sends and sends[0]["msg_id"] is not None
+    assert tg.groups or tg.photos or tg.texts

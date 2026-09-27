@@ -478,8 +478,10 @@ class Engine:
                         inst, kind, caption, imgs=imgs, sub_caption=sub,
                         reply_to_dm=inst.dm_msg_ids[0] if inst.dm_msg_ids else None,
                         force=True)     # every potential break also to the DM
-                    if dmid is not None:
-                        inst.dm_msg_ids.append(dmid)
+                    # NOTE: deliberately NOT appended to dm_msg_ids — that
+                    # list's [0] is the mirrored COMPRESSION (the anchor every
+                    # heads-up threads onto); a box has no DM compression, so
+                    # appending here would hijack future reply targets.
                 sends.append({"kind": kind, "id": inst.id, "msg_id": mid,
                               "side": side, "pattern_tf": ptf})
                 self.audit.write({"event": "post", "kind": kind, "id": inst.id,
@@ -547,24 +549,32 @@ class Engine:
         if self.tg is None:
             return None
         imgs = imgs or []
-        if not imgs:
-            return await self.tg.post(caption, reply_to_id=reply_to,
-                                      chat_id=chat_id)
-        mid = await self.tg.post_media_group(caption, imgs,
-                                             reply_to_id=reply_to,
-                                             chat_id=chat_id)
-        if mid is not None:
-            return mid
+        # A stale reply target must never swallow the alert: a message
+        # deleted since it was recorded (QNT DM twin 2429) makes Telegram
+        # answer 400 "message to be replied not found" for EVERY form of the
+        # post. Each form is therefore tried WITH the reply first, then
+        # WITHOUT it.
+        targets = [reply_to] if reply_to else [None]
+        if reply_to:
+            targets.append(None)
+        for target in targets:
+            if imgs:
+                mid = await self.tg.post_media_group(caption, imgs,
+                                                     reply_to_id=target,
+                                                     chat_id=chat_id)
+            else:
+                mid = await self.tg.post(caption, reply_to_id=target,
+                                         chat_id=chat_id)
+            if mid is not None:
+                return mid
+        # last resort: separate photos, no reply
         first: Optional[int] = None
         for i, im in enumerate(imgs):
             m = await self.tg.post_photo(caption if i == 0 else sub_caption,
-                                         im, reply_to_id=reply_to,
+                                         im, reply_to_id=None,
                                          chat_id=chat_id)
             if i == 0:
                 first = m
-        if first is None:
-            first = await self.tg.post(caption, reply_to_id=reply_to,
-                                       chat_id=chat_id)
         return first
 
     def _dm_mirror(self, inst: Instance, force: bool = False) -> bool:

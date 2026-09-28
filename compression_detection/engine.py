@@ -314,17 +314,22 @@ class Engine:
     # ── potential break ─────────────────────────────────────────────────
     def _potential_actions(self, instances, candles_by_key: Dict[tuple, list],
                            now_s: int) -> List[Action]:
-        """Potential-break pattern pass (user rule 2026-09-27).
+        """Potential-break pattern pass (user rules 2026-09-27).
 
-        Active BOXES only. The touch lives in the BOX'S OWN tf (a confirmed
-        EH/EL on the line); the confirming swing may sit on the box tf or
-        one tf below (lower tf first — its alert carries both charts).
+        Active BOXES only. The touch lives in the BOX tf OR the tf below
+        it (confirmed EH/EL on the line); the confirming swing may sit on
+        the box tf or one tf below (lower tf first — its alert carries
+        both charts).
 
-        ONE alert per box (user rule 2026-09-27, PIEVERSE case: a long and
-        a short went out 5 seconds apart): both sides are evaluated, the
-        FRESHEST confirmation wins, and firing one side suppresses the
-        other (both flags are written). The flag is written at EMIT time,
-        the same contract the breakout verdict uses, so a scan can never
+        ONE alert PER TOUCH (user rule 2026-09-27 evening): a touch
+        authorizes exactly one higher low / lower high. The touch ts used
+        is stored on the instance, `since_touch_ts` is passed back into
+        find_potential, and a strictly NEWER touch re-arms the side — no
+        HL-beats-HL comparison, the touch→swing pairing is the structure.
+        Within one scan: both sides evaluated, the FRESHEST confirmation
+        wins, firing one side writes both flags (PIVERSE case: a long and
+        a short went out 5 seconds apart). Flags written at EMIT time, the
+        same contract the breakout verdict uses, so a scan can never
         re-arm an alert already in flight.
         """
         out: List[Action] = []
@@ -359,15 +364,23 @@ class Engine:
             fresh_s = (now_s - POTENTIAL_FRESH_S) * 1000
             hits = []
             for side in ("long", "short"):
-                if inst.notified.get(f"potential_{side}"):
+                # one alert PER TOUCH (user rule 2026-09-27 evening): the
+                # touch that fired is stored; the side re-arms only on a
+                # strictly NEWER touch. Flags written before that rule have
+                # no touch attached — those sides stay spent (one-shot).
+                spent = inst.notified.get(f"potential_{side}_touch_ts")
+                if spent is None and inst.notified.get(f"potential_{side}"):
                     continue
                 hit = find_potential(side, main_candles, scan, self.cfg,
                                      main_tf=inst.tf,
                                      anchor_ts=inst.anchor_ts,
                                      box_at=box_at,
-                                     touch_atr=inst.atr)
+                                     touch_atr=inst.atr,
+                                     since_touch_ts=spent or 0)
                 if hit is None:
                     continue
+                if spent is not None and hit["touch_ts"] <= spent:
+                    continue   # the same touch can never fire twice
                 # freshness window (user choice 2026-09-27): a confirmation
                 # older than 12h is old news.
                 if hit["confirm_ts"] < fresh_s:
@@ -384,6 +397,7 @@ class Engine:
             side = win["side"]
             for s in ("long", "short"):
                 inst.notified[f"potential_{s}"] = True
+            inst.notified[f"potential_{side}_touch_ts"] = win["touch_ts"]
             inst.add_event("potential", now_s, side=side,
                            pattern_tf=win["pattern_tf"],
                            mid=win["mid_price"],

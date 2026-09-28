@@ -850,3 +850,102 @@ def test_live_dip_past_1x_but_short_of_the_clear_gate_is_held(monkeypatch):
     assert fp(candles, "long") is None
     monkeypatch.setattr(pb, "LIVE_CLEAR_ATR", 1.0)
     assert fp(candles, "long") is not None
+
+
+# ── one alert PER TOUCH + lower-tf touches (user rules 2026-09-27 eve) ──
+
+def _rearm_path():
+    """Three touch/third rounds on a flat top:
+    touch@110 -> HL 105 -> touch@110.4 -> HL 105.5 -> touch@110.5 -> HL 106.2.
+    Each touch sits within BOX_ATR of the line (109.5) and each third
+    clears box_low + eq."""
+    return (_line(100, 110.1, 12) + _line(110.1, 100, 12) +
+            _line(100, 110, 12) + _line(110, 105, 8) +
+            _line(105, 110.4, 10) + _line(110.4, 105.5, 6) +
+            _line(105.5, 110.5, 8) + _line(110.5, 109, 2) +
+            _line(109, 106.2, 6) + _line(106.2, 110, 6))
+
+
+def test_one_potential_per_touch_rearm():
+    """A fired touch is SPENT (since_touch_ts); a strictly newer touch with
+    its own third re-arms — no HL-beats-HL rule, just touch -> one swing."""
+    path = _rearm_path()
+    full = mk(path)
+    r_full = fp(full, "long")
+    assert r_full is not None
+    # the freshest complete touch (H4) armed this hit
+    assert fp(full, "long", since_touch_ts=r_full["touch_ts"]) is None
+
+    # slice before the third touch exists: the middle touch arms instead
+    r_mid = fp(mk(path[:63]), "long")
+    assert r_mid is not None
+    assert r_mid["touch_ts"] < r_full["touch_ts"]
+
+    # that middle touch is spent -> the next touch re-arms on full candles
+    r_again = fp(full, "long", since_touch_ts=r_mid["touch_ts"])
+    assert r_again is not None
+    assert r_again["touch_ts"] == r_full["touch_ts"]
+
+
+def test_lower_tf_touch_with_main_tf_third():
+    """The touch may live on the timeframe BELOW the box (user rule
+    2026-09-27 evening); the third then sits on the main tf as its last
+    pivot, with nothing on the touch's tf in between."""
+    main = mk(_line(100, 110.1, 12) + _line(110.1, 100, 12) +
+              _line(100, 107, 12) + _line(107, 105, 4) +
+              _line(105, 118, 10))              # L 105 = last main pivot
+    low = mk(_line(100, 110.1, 12) + _line(110.1, 100, 12) +
+             _line(100, 110, 12) + _line(110, 99, 4))   # EH 110 touch only
+    hit = fp(main, "long", main_candles=main,
+             scan=[("15m", low), ("1h", main)])
+    assert hit is not None, "lower-tf touch must be accepted"
+    assert hit["touch_tf"] == "15m"
+    assert hit["pattern_tf"] == "1h"
+    assert hit["touch_price"] == 110.0
+    assert hit["second_price"] == 105.0
+
+
+def test_lower_tf_touch_blocked_by_intervening_low_tf_pivot():
+    """Adjacency: a pivot on the touch's own tf between touch and third
+    means the structure already moved — no alert."""
+    main = mk(_line(100, 110.1, 12) + _line(110.1, 100, 12) +
+              _line(100, 107, 12) + _line(107, 105, 4) +
+              _line(105, 118, 10))               # same third as above
+    low = mk(_line(100, 110.1, 12) + _line(110.1, 100, 12) +
+             _line(100, 110, 12) + _line(110, 99, 2) +
+             _line(99, 105, 4))                  # L 99 pivot between them
+    hit = fp(main, "long", main_candles=main,
+             scan=[("15m", low), ("1h", main)])
+    assert hit is None
+
+
+def test_rearm_fires_again_on_a_new_touch(cfg, monkeypatch):
+    """Engine arming: fire #1 stores its touch_ts; the same touch never
+    fires twice; a newer touch arms fire #2; then silence."""
+    e = _engine(cfg, monkeypatch)
+    inst = _inst()
+    path = _rearm_path()
+    k1 = mk(path[:63])
+    k2 = mk(path)
+
+    a1 = e._potential_actions({inst.id: inst},
+                              {(inst.symbol, "1h"): k1,
+                               (inst.symbol, "15m"): k1}, now_s=NOW_S)
+    assert len(a1) == 1
+    stored1 = inst.notified.get("potential_long_touch_ts")
+    assert stored1 is not None
+
+    a2 = e._potential_actions({inst.id: inst},
+                              {(inst.symbol, "1h"): k2,
+                               (inst.symbol, "15m"): k2},
+                              now_s=NOW_S + 600)
+    assert len(a2) == 1, "a NEW touch must re-arm the same side"
+    stored2 = inst.notified.get("potential_long_touch_ts")
+    assert stored2 is not None and stored2 > stored1
+
+    a3 = e._potential_actions({inst.id: inst},
+                              {(inst.symbol, "1h"): k2,
+                               (inst.symbol, "15m"): k2},
+                              now_s=NOW_S + 1200)
+    assert a3 == [], "the same touch cannot fire a third time"
+    assert len([ev for ev in inst.events if ev["kind"] == "potential"]) == 2

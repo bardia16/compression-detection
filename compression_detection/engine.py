@@ -84,9 +84,17 @@ class Engine:
     def _load_state(self) -> None:
         try:
             d = json.loads(self.cfg.state_path.read_text())
+            raw = d.get("instances") or {}
+            keep = set(self.cfg.timeframes)
+            # instances on a tf that is no longer a detection tf (15m,
+            # user rule 2026-09-28) would freeze mid-state and clutter the
+            # website — drop them on load.
             self.instances = {k: Instance.from_dict(v)
-                              for k, v in (d.get("instances") or {}).items()}
-            log.info("state loaded: %d instances", len(self.instances))
+                              for k, v in raw.items()
+                              if v.get("tf") in keep}
+            dropped = len(raw) - len(self.instances)
+            log.info("state loaded: %d instances%s", len(self.instances),
+                     f" ({dropped} stale-tf dropped)" if dropped else "")
         except FileNotFoundError:
             self.instances = {}
         except Exception as exc:
@@ -159,14 +167,32 @@ class Engine:
         return {"candles": candles, "pivots": pivots, "labeled": labeled,
                 "candidates": cands, "last_bar": last_bar}
 
+    def _fetch_tfs(self) -> List[str]:
+        """Detection tfs + every lower tf the potential pass reads.
+
+        15m carries no patterns anymore (user rule 2026-09-28) but 1h
+        boxes still touch on it, so its candles are fetched candle-only.
+        """
+        out = list(self.cfg.timeframes)
+        for tf in self.cfg.timeframes:
+            for t in LOWER_TF.get(tf, ()):
+                if t not in out:
+                    out.append(t)
+        return out
+
     async def _fetch_coin(self, ses: aiohttp.ClientSession, sem: asyncio.Semaphore,
                           pair: str) -> Dict[str, Optional[dict]]:
         async with sem:
             out: Dict[str, Optional[dict]] = {}
-            for tf in self.cfg.timeframes:
+            det_tfs = set(self.cfg.timeframes)
+            for tf in self._fetch_tfs():
                 try:
                     candles = await fetch_klines(ses, pair, tf, self.cfg.candle_limit)
-                    out[tf] = self._analyze_candles(candles, tf)
+                    if tf in det_tfs:
+                        out[tf] = self._analyze_candles(candles, tf)
+                    else:
+                        # potential-only lower tf: candles, no pattern scan
+                        out[tf] = {"candles": candles, "candidates": []}
                 except Exception as exc:
                     log.warning("analyze %s %s failed: %s", pair, tf, exc)
                     out[tf] = None
@@ -241,23 +267,21 @@ class Engine:
                         *[self._fetch_coin(ses, sem, p) for p in grace_pairs]))
                     log.info("grace-fetch: %d out-of-universe actives: %s",
                              len(grace), ", ".join(grace))
-            # pass A — materialize candles + detections. Split from the
-            # lifecycle pass on purpose (user rule 2026-09-27): the
-            # potential break must run while every box is still ALIVE, so a
-            # box whose continuation pass is about to hand it over to an
-            # ascending/descending triangle still gets its alert out first.
+            # pass A — materialize candles + detections. Detection tfs
+            # produce candidates; potential-only lower tfs (15m) contribute
+            # candles alone (user rule 2026-09-28: no 15m patterns).
             for pair, res in zip(pairs, results):
                 # store the full Binance symbol (ORCAUSDT) — messages, charts,
                 # probe fetches and ticker calls all need it (bare ORCA broke
                 # chart fetches 503 and made every probe miss, 2026-09-16)
                 sym = pair.split("/")[0] + "USDT"
-                for tf in self.cfg.timeframes:
+                for tf in self._fetch_tfs():
                     r = res.get(tf)
                     if r is None:
                         errors.append(f"{sym}:{tf} no data")
                         continue
                     candles_by_key[(sym, tf)] = r["candles"]
-                    if r["candidates"]:
+                    if r.get("candidates"):
                         detections.append({
                             "symbol": sym, "tf": tf,
                             "candidates": [c.to_dict() for c in r["candidates"][:8]],
@@ -356,14 +380,15 @@ class Engine:
                 bar = _ref["bar"] + (ts - _ref["ts"]) / _ms
                 return (_u.at(bar), _l.at(bar))
 
-            # scan preference: the tf one below the box first, then the
-            # box's own tf (STEP 1's touch always comes from the box tf).
+            # scan preference: the box's lower tfs nearest-first, then
+            # the box's own tf (user rule 2026-09-28: 1h -> [15m],
+            # 4h -> [1h, 15m], 1d -> [4h, 1h, 15m]).
             main_candles = candles_by_key.get((inst.symbol, inst.tf))
             if not main_candles:
                 continue
-            low_tf = LOWER_TF.get(inst.tf)
+            low_tfs = LOWER_TF.get(inst.tf, [])
             scan = [(t, candles_by_key.get((inst.symbol, t)))
-                    for t in (low_tf, inst.tf) if t]
+                    for t in [*low_tfs, inst.tf] if t]
             scan = [(t, c) for t, c in scan if c]
 
             fresh_s = (now_s - POTENTIAL_FRESH_S) * 1000

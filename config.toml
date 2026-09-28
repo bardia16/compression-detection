@@ -1,6 +1,6 @@
 [project]
-timeframes = ["15m", "1h", "4h"]
-candle_limit = 400             # per TF (15m≈4d, 1h≈16d, 4h≈66d)
+timeframes = ["1h", "4h", "1d"]  # detection only (user rule 2026-09-28: no 15m patterns)
+candle_limit = 400             # per TF (1h≈16d, 4h≈66d, 1d≈400d; 15m fetched candle-only for potentials)
 
 [zigzag]
 coef = 1.2                     # mirrors daw-theory live (2026-09-15)

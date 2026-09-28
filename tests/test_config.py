@@ -4,7 +4,8 @@ from compression_detection.config import Config
 
 def test_load_from_repo_config():
     cfg = Config.load()
-    assert cfg.timeframes == ["15m", "1h", "4h"]
+    # user rule 2026-09-28: no 15m patterns — detection is 1h/4h/1d
+    assert cfg.timeframes == ["1h", "4h", "1d"]
     assert cfg.candle_limit == 400
     assert cfg.zigzag_coef == 1.2
     assert cfg.zigzag_atr_length == 7

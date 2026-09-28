@@ -60,7 +60,9 @@ had already moved on — PIEVERSE printed a short 5 seconds after its long.
 
 `box_at` (ts -> (upper, lower)) and `touch_atr` come from the engine, which
 owns the Instance and its Line objects — no box lines, no pattern (fail
-closed).  `LOWER_TF` maps a box tf to the tf one step below it.
+closed).  `LOWER_TF` maps a box tf to its lower tfs, nearest first
+(user rule 2026-09-28: detection runs on 1h/4h/1d only; 15m exists
+purely as a potential lower tf and never carries its own pattern).
 """
 from __future__ import annotations
 
@@ -71,8 +73,17 @@ from .dow import label_all_pivots
 from .models import Candle
 from .zigzag import ZigZag
 
-# box TF -> the TF scanned below it (None = nothing under 15m)
-LOWER_TF: Dict[str, Optional[str]] = {"4h": "1h", "1h": "15m", "15m": None}
+# box TF -> the LOWER tfs scanned for touches / confirming swings,
+# nearest first (user rule 2026-09-28):
+#   1h box -> 15m only
+#   4h box -> 1h and 15m
+#   1d box -> 4h, 1h and 15m
+# 15m has no key: it is never a pattern tf anymore.
+LOWER_TF: Dict[str, List[str]] = {
+    "1h": ["15m"],
+    "4h": ["1h", "15m"],
+    "1d": ["4h", "1h", "15m"],
+}
 
 # Freshness window (user choice 2026-09-27): a confirmation older than this
 # is old news — the scan would otherwise backfill patterns that completed

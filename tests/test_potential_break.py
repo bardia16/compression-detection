@@ -274,7 +274,21 @@ def test_potential_lines_short_adjusts_the_low():
 
 
 def test_lower_tf_map():
-    assert LOWER_TF == {"4h": "1h", "1h": "15m", "15m": None}
+    # user rule 2026-09-28: detection 1h/4h/1d; 15m is lower-tf only
+    assert LOWER_TF == {
+        "1h": ["15m"],
+        "4h": ["1h", "15m"],
+        "1d": ["4h", "1h", "15m"],
+    }
+
+
+def test_fetch_tfs_include_potential_lower_tfs():
+    """15m carries no patterns but is always fetched — 1h boxes touch
+    and confirm swings on it (user rule 2026-09-28)."""
+    from compression_detection.config import Config
+    eng = eng_mod.Engine.__new__(eng_mod.Engine)
+    eng.cfg = Config.load()
+    assert eng._fetch_tfs() == ["1h", "4h", "1d", "15m"]
 
 
 # ── caption ────────────────────────────────────────────────────────────

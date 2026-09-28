@@ -265,6 +265,47 @@ def _label_ok(
     return True
 
 
+# Box equality band (user rule 2026-09-28, MINA case): a box accepts
+# taps up to 2 x ATR14 apart (max-of-both, same flavor as dow) — the
+# looser band is SCOPED to the box spec: triangles and the potential
+# break keep the global 1.0 labeling from dow.
+BOX_EQ_COEF = 2.0
+
+
+def _box_eq_ok(refs: Sequence[PivotRef],
+               atr14_series: List[Optional[float]]) -> bool:
+    """Geometric equality for a box window: every non-first high/low
+    within BOX_EQ_COEF x ATR of its predecessor of the same side
+    (first of each side exempt — box's first-pivot exemptions).
+    Judged HERE at 2x instead of on the precomputed 1x labels; the
+    precomputed label strings are not consulted for boxes."""
+    def _thr(i: int, j: int) -> Optional[float]:
+        vals = [atr14_series[k] for k in (i, j)
+                if k < len(atr14_series) and atr14_series[k]]
+        return BOX_EQ_COEF * max(vals) if vals else None
+
+    seen_h = seen_l = False
+    prev_h = prev_l = None
+    for r in refs:
+        if r.is_high:
+            if not seen_h:
+                seen_h, prev_h = True, r
+                continue
+            thr = _thr(r.bar_index, prev_h.bar_index)
+            if thr is None or abs(r.price - prev_h.price) > thr:
+                return False
+            prev_h = r
+        else:
+            if not seen_l:
+                seen_l, prev_l = True, r
+                continue
+            thr = _thr(r.bar_index, prev_l.bar_index)
+            if thr is None or abs(r.price - prev_l.price) > thr:
+                return False
+            prev_l = r
+    return True
+
+
 def _check_window(
     spec: TypeSpec,
     refs: Sequence[PivotRef],
@@ -296,7 +337,11 @@ def _check_window(
     if atr is None or atr <= 0:
         return None
 
-    if not _label_ok(refs, spec):
+    if spec.name == TYPE_BOX:
+        # boxes: equality at 2 x ATR, judged geometrically (BOX_EQ_COEF)
+        if not _box_eq_ok(refs, atr14_series):
+            return None
+    elif not _label_ok(refs, spec):
         return None
 
     upper_pts = [(r.abs_bar, r.price) for r in highs]
@@ -305,24 +350,28 @@ def _check_window(
         # Boxes are HORIZONTAL (user rule 2026-09-28): a box is a flat
         # range — each side's line is the mean of its pivots with slope
         # forced to 0, never a tilted fit. Triangles keep fit_line.
-        # Flat-spread gate keeps the old slope rejection semantics: both
-        # sides must stay within flat_tol x ATR across their own span
-        # (a drifting side fails here instead of via slope_class).
-        def _spread_ok(pts):
-            vals = [p for _, p in pts]
-            bars = [b for b, _ in pts]
+        # Flat-drift gate keeps the old slope rejection semantics: the
+        # side's endpoint drift must stay within flat_tol x ATR over its
+        # span (the horizontal stand-in for slope_class). ATR lookup
+        # uses the candle-index bars, same as _span_atr.
+        def _drift_ok(side_refs):
+            bars = [r.bar_index for r in side_refs]
             av = [atr14_series[b] for b in (bars[0], bars[-1])
                   if b < len(atr14_series) and atr14_series[b]]
             span_atr = max(av) if av else atr
-            return (max(vals) - min(vals)) <= cfg.flat_tol_atr * span_atr
-        if not _spread_ok(upper_pts) or not _spread_ok(lower_pts):
+            return (abs(side_refs[-1].price - side_refs[0].price)
+                    <= cfg.flat_tol_atr * span_atr)
+        if not _drift_ok(highs) or not _drift_ok(lows):
             return None
-        upper = st.Line(slope=0.0,
-                        intercept=sum(p for _, p in upper_pts) / len(upper_pts),
-                        base_bar=0.0)
-        lower = st.Line(slope=0.0,
-                        intercept=sum(p for _, p in lower_pts) / len(lower_pts),
-                        base_bar=0.0)
+        # Center between the side's extreme taps (minimax): minimizes
+        # the worst tap-to-line distance, which is what the boundary
+        # tolerance measures — an arithmetic mean sits off-center on
+        # asymmetric tap sets and pushed borderline boxes over the edge.
+        def _mid(pts):
+            vals = [p for _, p in pts]
+            return (max(vals) + min(vals)) / 2.0
+        upper = st.Line(slope=0.0, intercept=_mid(upper_pts), base_bar=0.0)
+        lower = st.Line(slope=0.0, intercept=_mid(lower_pts), base_bar=0.0)
     else:
         upper = st.fit_line(upper_pts)
         lower = st.fit_line(lower_pts)
@@ -330,8 +379,15 @@ def _check_window(
             return None
 
     # Boundary respect for every pivot in the window (all pivots, both sides)
-    up_flags = st.respects(upper_pts, upper, atr, cfg.boundary_tol_atr)
-    lo_flags = st.respects(lower_pts, lower, atr, cfg.boundary_tol_atr)
+    # Box boundary band follows the box equality coef (user rule
+    # 2026-09-28): taps sit within 2 x ATR of the flat line — with a
+    # horizontal line the +-1 x ATR band was tighter than the equality
+    # rule and dropped chain-equal sides whose cumulative range edged
+    # past it (BONK 1h). Other types keep boundary_tol_atr.
+    b_tol = (cfg.boundary_tol_atr * BOX_EQ_COEF
+             if spec.name == TYPE_BOX else cfg.boundary_tol_atr)
+    up_flags = st.respects(upper_pts, upper, atr, b_tol)
+    lo_flags = st.respects(lower_pts, lower, atr, b_tol)
     if not all(up_flags) or not all(lo_flags):
         return None
 

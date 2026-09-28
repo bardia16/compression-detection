@@ -350,15 +350,34 @@ def test_box_rejected_when_upper_drifts():
     assert TYPE_BOX not in types_of(cands)
 
 
-def test_box_label_gate_rejects_wrong_low_label():
-    """Geometry flat but a non-first low labeled HL — not a box."""
+def test_box_equality_band_rejects_beyond_2x_atr():
+    """Box equality = 2 x ATR (user rule 2026-09-28). A low 4.5 apart
+    ( > 2 x ATR 2.0) kills every end-anchored window even though the
+    forced label strings say EL — strings are no longer consulted."""
     cands = detect([
         ("H", 100.0, 10, None),
         ("L", 90.0, 14, None),
         ("H", 100.5, 18, "EH"),
-        ("L", 91.9, 22, "HL"),
-    ], last_bar=24)
+        ("L", 94.5, 22, "EL"),    # delta 4.5 > 2 x ATR
+        ("H", 100.2, 26, "EH"),
+        ("L", 90.5, 30, "EL"),
+    ], last_bar=32)
     assert TYPE_BOX not in types_of(cands)
+
+
+def test_box_equality_band_accepts_within_2x_atr():
+    """Taps between 1x and 2x ATR are EQUAL for boxes now (old string
+    labeling would have called 90 -> 93 an HL and killed the box).
+    Non-monotonic side keeps the flat-drift gate honest."""
+    cands = detect([
+        ("H", 100.0, 10, None),
+        ("L", 90.0, 14, None),
+        ("H", 100.5, 18, "EH"),
+        ("L", 93.0, 22, "HL"),    # delta 3.0 <= 2 x ATR -> equal for box
+        ("H", 100.3, 26, "EH"),
+        ("L", 90.8, 30, "EL"),
+    ], last_bar=32)
+    assert TYPE_BOX in types_of(cands)
 
 
 def test_sym_triangle_rejected_without_convergence():

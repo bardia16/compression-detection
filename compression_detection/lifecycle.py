@@ -279,7 +279,15 @@ class Instance:
         by to_dict but dropped here, so each engine restart re-fired the
         alerts it had already sent). Unknown keys are kept: to_dict is the
         authority on what exists."""
-        out = {k: bool(v) for k, v in (d.get("notified") or {}).items()}
+        out = {}
+        for k, v in (d.get("notified") or {}).items():
+            # bool() here would turn potential_*_touch_ts (an int epoch ms)
+            # into True -> since_touch_ts=1 -> the per-touch filters both
+            # no-op and the guard `hit_ts <= spent` never trips -> EVERY
+            # restart re-fired the same touch (SAND double-post 3162/3167,
+            # 2026-09-28). Flags are bools; epoch timestamps are ints.
+            out[k] = (v if isinstance(v, int) and not isinstance(v, bool)
+                      else bool(v))
         out.setdefault("compression", False)
         out.setdefault("breakout", False)
         return out

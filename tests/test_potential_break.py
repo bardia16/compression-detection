@@ -536,6 +536,20 @@ def test_all_notified_flags_survive_state_round_trip():
     assert back.notified["breakout"] is False
 
 
+def test_touch_ts_int_survives_restart_not_coerced_to_bool():
+    """2026-09-28: _notified_from coerced every value with bool() — the
+    touch epoch ms became True, since_touch_ts=1 made both per-touch
+    filters no-op and `hit_ts <= spent` never tripped -> SAND posted
+    twice (3162 + 3167) on the restart between them."""
+    inst = _inst(notified={"compression": False, "breakout": False,
+                           "potential_long": True,
+                           "potential_long_touch_ts": 1790550000000})
+    back = type(inst).from_dict(inst.to_dict())
+    ts = back.notified.get("potential_long_touch_ts")
+    assert ts == 1790550000000
+    assert isinstance(ts, int) and not isinstance(ts, bool)
+
+
 def test_notified_defaults_when_state_has_no_flags():
     inst = _inst()
     d = inst.to_dict()

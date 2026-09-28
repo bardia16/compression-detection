@@ -272,10 +272,14 @@ def _check_window(
     cfg: DetectConfig,
     close_by_bar: Optional[Dict[int, float]] = None,
 ) -> Optional[Candidate]:
-    # Live-final windows are triangles-only (user rule 2026-09-27): the
-    # final HL/LH may be the unconfirmed zigzag extreme; everything else
-    # (boxes first) still requires confirmed pivots throughout.
-    if refs[-1].is_live and spec.name not in (TYPE_ASC_TRI, TYPE_DESC_TRI):
+    # Live-final windows: triangles (user rule 2026-09-27) and BOXES
+    # (option A, 2026-09-28, SAND case: a box's 4th pivot IS the touch,
+    # so waiting its 1h confirm delayed detection for hours — pattern
+    # done 04:00, touch confirmed 07:30, box 08:31, alert 08:44). The
+    # final pivot may be the unconfirmed zigzag extreme; everything else
+    # still requires confirmed pivots throughout.
+    if refs[-1].is_live and spec.name not in (TYPE_ASC_TRI, TYPE_DESC_TRI,
+                                              TYPE_BOX):
         return None
     highs = [r for r in refs if r.is_high]
     lows = [r for r in refs if not r.is_high]
@@ -615,8 +619,8 @@ def detect_candidates(
     complete the pattern while the leg is still developing — AR's final
     HL printed 04:00 but only confirmed at 07:00, delivering its
     confirmation alert together with the breakout. `_check_window`
-    restricts live-final windows to triangles; boxes keep confirmed
-    pivots only.
+    restricts live-final windows to triangles and boxes (2026-09-28,
+    option A).
     """
     refs: List[PivotRef] = []
     confirmed_ts = set()

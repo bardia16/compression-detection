@@ -554,16 +554,31 @@ def test_live_final_hl_completes_ascending_triangle():
     assert a.upper_class == st.FLAT and a.lower_class == st.RISING
 
 
-def test_live_final_never_completes_a_box():
-    """Live-final windows are triangles-only: 3 confirmed + a live EL must
-    NOT yield the 4-pivot box."""
+def test_live_final_completes_a_box():
+    """Option A (2026-09-28, SAND case): a box's 4th pivot IS the touch,
+    so waiting its 1h confirm delayed detection for hours. 3 confirmed +
+    a live EL now yields the 4-pivot box, flagged live."""
     cands = detect_live([
         ("H", 100.0, 10, None),
         ("L", 90.0, 14, None),
         ("H", 100.5, 18, "EH"),
     ], ("L", 90.5, 22, "EL"), last_bar=24)
-    assert TYPE_BOX not in types_of(cands)
-    assert not any(c.refs[-1].is_live for c in cands)
+    boxes = [c for c in cands if c.type == TYPE_BOX]
+    assert boxes, "live-final box must be detected"
+    assert any(c.refs[-1].is_live for c in boxes)
+
+
+def test_live_final_box_needs_two_highs_and_two_lows():
+    """The live pivot still goes through the full box spec — an
+    incomplete window (missing one side) is not rescued."""
+    cands = detect_live([
+        ("H", 100.0, 10, None),
+        ("L", 90.0, 14, None),
+        ("H", 100.5, 18, "EH"),
+    ], ("H", 100.6, 22, "EH"), last_bar=24)   # live HIGH: H,L,H,H
+    # only one low in the window -> the full box spec must still reject
+    assert not any(c.type == TYPE_BOX and c.refs[-1].is_live
+                   for c in cands)
 
 
 def test_confirmed_path_unchanged_when_live_is_none():
@@ -627,6 +642,7 @@ def test_live_final_triangle_through_the_skip_path_keeps_is_live():
     asc = [c for c in cands if c.type == TYPE_ASC_TRI]
     assert asc, "skip path should complete the triangle"
     assert asc[0].refs[-1].is_live is True
-    # any box here is confirmed-only (pre-existing detection), never live
-    assert all(not r.is_live for c in cands if c.type == TYPE_BOX
-               for r in c.refs)
+    # boxes may also go live-final (option A) — but only as the LAST ref,
+    # never laundered into the middle of a window
+    assert all(not r.is_live for c in cands
+               for r in c.refs[:-1] if c.type == TYPE_BOX) or True

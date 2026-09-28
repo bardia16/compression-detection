@@ -142,7 +142,8 @@ class Engine:
         # waiting out the confirm lag (AR: HL 04:00 -> confirm 07:00, its
         # confirmation landing on top of the breakout). Labels are computed
         # on the extended list — earlier labels are prefix-stable — and the
-        # detector restricts live-final windows to asc/desc triangles.
+        # the detector restricts live-final windows to asc/desc triangles
+        # and boxes (option A, 2026-09-28).
         full = pivots
         live = None
         prov = zz.provisional

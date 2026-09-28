@@ -157,9 +157,8 @@ def find_potential(side: str,
         return None
 
     want = "EH" if side == "long" else "EL"
-    main_lab = label_all_pivots(_zigzag(main_candles, cfg),
-                                atr_series(main_candles, cfg.atr14_length,
-                                           cfg.atr14_method))
+    main_a14 = atr_series(main_candles, cfg.atr14_length, cfg.atr14_method)
+    main_lab = label_all_pivots(_zigzag(main_candles, cfg), main_a14)
     main_pivots = [p for p, _ in main_lab]
     if len(main_pivots) < 2:
         return None
@@ -198,14 +197,36 @@ def find_potential(side: str,
                 continue
             side_line = up if side == "long" else lo
             if abs(p.price - side_line) <= touch_atr:
-                touches.append((p.ts, 0 if tf == main_tf else 1, tf, p))
+                touches.append((p.ts, 0 if tf == main_tf else 1, tf, p, False))
+
+    # ── LIVE main-tf touch (user choice 2026-09-28, option A / SAND) ───
+    # The touch's own confirm was the slow gate: SAND's pattern completed
+    # 04:00, the touch (a box's 4th pivot) confirmed 07:30, the box was
+    # detected 08:31 and the alert went out 08:44 — the pullback was long
+    # over. The provisional extreme, once structurally EH/EL ON the line,
+    # is the touch NOW; if it never confirms, it stops qualifying on its
+    # own (price runs off the line or the label changes).
+    prov = _provisional(main_candles, cfg)
+    if (prov is not None and main_pivots
+            and prov.ts not in {p.ts for p in main_pivots}
+            and prov.ts > since_touch_ts):
+        lab_full = label_all_pivots(list(main_pivots) + [prov], main_a14)
+        if (lab_full and lab_full[-1][0].ts == prov.ts
+                and lab_full[-1][1] is not None
+                and lab_full[-1][1].name == want):
+            up, lo = lines(prov.ts)
+            side_line = up if side == "long" else lo
+            if (side_line is not None
+                    and abs(prov.price - side_line) <= touch_atr):
+                touches.append((prov.ts, 0, main_tf, prov, True))
     if not touches:
         return None
     touches.sort(key=lambda t: (t[0], -t[1]), reverse=True)  # freshest first
     pivots_by_tf: Dict[str, list] = {
         tf: [p for p, _ in lab] for tf, lab in labs.items()}
 
-    def _third_for(touch, touch_tf: str) -> Optional[dict]:
+    def _third_for(touch, touch_tf: str,
+                   touch_is_live: bool = False) -> Optional[dict]:
         """STEP 2 for one candidate touch (see module docstring)."""
         touch_is_main = touch_tf == main_tf
         hit: Optional[dict] = None
@@ -270,8 +291,16 @@ def find_potential(side: str,
                             continue
                 else:
                     if touch_is_main:
-                        # the touch must still be the last main-tf pivot
-                        if last_main is None or last_main.ts != touch.ts:
+                        # the touch must still be the last main-tf pivot.
+                        # A LIVE touch is never a confirmed pivot — its
+                        # freshness is "nothing confirmed has superseded
+                        # it": every confirmed main pivot predates it.
+                        if last_main is None:
+                            continue
+                        if touch_is_live:
+                            if last_main.ts >= touch.ts:
+                                continue
+                        elif last_main.ts != touch.ts:
                             continue
                     else:
                         # lower-tf touch: adjacency on the touch's own tf
@@ -311,7 +340,12 @@ def find_potential(side: str,
             # CLOSE has displaced LIVE_CLEAR_ATR x ATR14 beyond it.
             if hit is None:
                 if touch_is_main:
-                    live_ok = last_main is not None and last_main.ts == touch.ts
+                    if touch_is_live:
+                        live_ok = (last_main is not None
+                                   and last_main.ts < touch.ts)
+                    else:
+                        live_ok = (last_main is not None
+                                   and last_main.ts == touch.ts)
                 else:
                     # lower-tf touch lives only with a same-tf live third
                     live_ok = tf == touch_tf
@@ -381,8 +415,8 @@ def find_potential(side: str,
                 return hit     # preference order: lower tf first
         return None
 
-    for _, _, touch_tf, touch in touches:   # freshest touch that works
-        hit = _third_for(touch, touch_tf)
+    for _, _, touch_tf, touch, touch_live in touches:  # freshest that works
+        hit = _third_for(touch, touch_tf, touch_live)
         if hit is not None:
             return hit
     return None

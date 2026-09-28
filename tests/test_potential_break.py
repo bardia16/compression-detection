@@ -919,6 +919,94 @@ def test_lower_tf_touch_with_main_tf_third():
     assert hit["second_price"] == 105.0
 
 
+# ── LIVE main-tf touch (user choice 2026-09-28, option A / SAND) ─────────
+
+def _live_touch_main():
+    """Main tf whose final HIGH is still UNCONFIRMED (the tail max close
+    never drops 1.2 x ATR7 below it): the touch exists structurally but
+    the zigzag won't yield it for hours — the SAND chain."""
+    hi0, top = 110.1, 110.2
+    return (_line(100, hi0, 12) + _line(hi0, 100, 12) +
+            _line(100, top, 6) + _line(top, 109.6, 4))   # ends mid-dip
+
+
+def _live_touch_third_confirmed():
+    """15m: rise, minor high (HH, off the line), pullback low 105 = the
+    confirming third, then a rally that confirms it. The 110.2 high sits
+    ON the box line; the second 15m high (108) is HH and off-line, so no
+    confirmed touch exists anywhere — only the LIVE one can fire."""
+    return (_line(100, 110.1, 48) + _line(110.1, 100, 48) +
+            _line(100, 108, 24) + _line(108, 105, 8) +
+            _line(105, 118, 12))
+
+
+def test_live_main_touch_fires_before_the_touch_confirms():
+    """SAND: pattern done 04:00, touch confirmed 07:30, box 08:31, alert
+    08:44. The provisional main-tf EH on the line IS the touch — the
+    confirmed swing then fires against it."""
+    main = mk(_live_touch_main())
+    low = mk(_live_touch_third_confirmed())
+    hit = fp(main, "long", main_candles=main,
+             scan=[("15m", low), ("1h", main)])
+    assert hit is not None, "live main touch must be accepted"
+    assert hit["touch_tf"] == "1h"
+    assert hit["touch_ts"] == T0 + 29 * STEP     # the provisional bar
+    assert hit["touch_price"] == 110.2
+    assert hit["pattern_tf"] == "15m"
+    assert hit["second_price"] == 105.0
+    assert hit["second_label"] == "HL"
+    # no confirmed pivot sits at the touch — the live path did the work
+    assert all(p.ts != hit["touch_ts"]
+               for p, _ in [(p, None) for p in
+                            __import__("compression_detection.potential_break",
+                                      fromlist=["_zigzag"])._zigzag(main, CFG)])
+
+
+def test_live_main_touch_rejected_when_the_label_is_not_eh():
+    """A provisional high that is HH (not equal to the previous high) is
+    a new extreme, not a touch on the box ceiling."""
+    main = mk(_line(100, 107, 12) + _line(107, 100, 12) +
+              _line(100, 110.2, 6) + _line(110.2, 109.6, 4))
+    low = mk(_live_touch_third_confirmed())
+    hit = fp(main, "long", main_candles=main,
+             scan=[("15m", low), ("1h", main)])
+    assert hit is None
+
+
+def test_live_main_touch_rejected_when_off_the_line():
+    """Label is EH but the provisional sits way off the box line — no
+    touch (the confirmed H is off-line too, so nothing else qualifies)."""
+    main = mk(_line(100, 111.3, 12) + _line(111.3, 100, 12) +
+              _line(100, 111.5, 6) + _line(111.5, 111.0, 4))
+    low = mk(_live_touch_third_confirmed())
+    hit = fp(main, "long", main_candles=main,
+             scan=[("15m", low), ("1h", main)])
+    assert hit is None
+
+
+def test_live_touch_with_live_third_swing_fires():
+    """The full SAND shape: live touch + LIVE third (the pullback low is
+    still unconfirmed; a close clears it by LIVE_CLEAR_ATR while staying
+    under the zigzag confirm — recent vol must be hot for that window to
+    exist, which is exactly the SAND tape)."""
+    main = mk(_live_touch_main())
+    # 15m: rise to a HH off-line top, 7-bar fast dip to 101.2, then the
+    # clearing candle close 102.6: > 101.2 + 1.75*ATR14 (1.328) but
+    # under the zigzag confirm (spread 0.1 pushes the zigzag's true-range
+    # ATR7 above 1.46 x close-only ATR14, which is the window).
+    low = mk(_line(100, 110.1, 48) + _line(110.1, 100, 48) +
+             _line(100, 111, 33) + _line(111, 101.2, 7) +
+             _line(101.2, 102.6, 1), spread=0.1)
+    hit = fp(main, "long", main_candles=main,
+             scan=[("15m", low), ("1h", main)])
+    assert hit is not None, "live touch + live third must fire"
+    assert hit.get("live") is True
+    assert hit["touch_tf"] == "1h"
+    assert hit["touch_price"] == 110.2
+    assert hit["pattern_tf"] == "15m"
+    assert hit["second_price"] == 101.2
+
+
 def test_lower_tf_touch_blocked_by_intervening_low_tf_pivot():
     """Adjacency: a pivot on the touch's own tf between touch and third
     means the structure already moved — no alert."""

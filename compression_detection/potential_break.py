@@ -15,6 +15,13 @@ STEP 2 — the CONFIRMING swing may live in the MAIN tf or the LOWER tf and
     SHORT: a confirmed high < box_high − eq
     eq = ATR14 of the scanned tf (the same band EL/EL labels are built
     from).
+    AND the swing must actually BE a higher low / lower high (label gate,
+    user rule 2026-09-27 — PLUME fired an EQUAL high 0.5x ATR under the
+    previous high as a "lower high", the band check only passed because
+    the sloped line sat above the swing): LONG third -> label HL, SHORT
+    third -> label LH, computed on the third's own tf. The LIVE third is
+    labeled the same way (provisional appended to the confirmed sequence)
+    — no label, no alert.
 
 ONE alert PER TOUCH (user rule 2026-09-27 evening): a touch authorizes
 exactly ONE higher low / lower high; the engine stores the touch ts it
@@ -211,6 +218,11 @@ def find_potential(side: str,
             idx = {c.ts: i for i, c in enumerate(candles)}
             main_seq = tf == main_tf
             last_main = main_pivots[-1] if main_pivots else None
+            need = "HL" if side == "long" else "LH"
+            # structural label of every confirmed pivot on this tf
+            # (unlabelable pivots are omitted by label_all_pivots -> None)
+            p_lab = {p.ts: (l.name if l else None)
+                     for p, l in label_all_pivots(pivots, a14)}
 
             for i, p in enumerate(pivots):
                 if p.ts <= touch.ts or p.ts not in idx:
@@ -233,6 +245,14 @@ def find_potential(side: str,
                     # lower than the box high, CLEARING the equality band
                     if not p.price < up - eq:
                         continue
+                # label gate (user rule 2026-09-27, PLUME case): the band
+                # check compares against the (possibly sloped) BOX LINE —
+                # the swing can clear it while sitting EQUAL to the
+                # previous same-side pivot, which is not a higher/lower
+                # high at all. Require the structural label on the
+                # pattern's own tf.
+                if p_lab.get(p.ts) != need:
+                    continue
 
                 # positional freshness of the touch (user rule 2026-09-27)
                 if main_seq:
@@ -278,6 +298,7 @@ def find_potential(side: str,
                     "mid_label": want,
                     "second_ts": p.ts,
                     "second_price": p.price,
+                    "second_label": need,
                     "confirm_ts": conf,
                 }
 
@@ -312,6 +333,18 @@ def find_potential(side: str,
                                     band_ok = (live.is_high
                                                and live.price < up_l - eq_l)
                             if band_ok:
+                                # label gate for the LIVE swing too: append the
+                                # provisional to the confirmed sequence and require
+                                # HL (long) / LH (short) — an equal live swing is
+                                # a retest, not a higher/lower high (PLUME case).
+                                full_lab = label_all_pivots(list(pivots) + [live],
+                                                            a14)
+                                band_ok = bool(
+                                    full_lab
+                                    and full_lab[-1][0].ts == live.ts
+                                    and full_lab[-1][1] is not None
+                                    and full_lab[-1][1].name == need)
+                            if band_ok:
                                 confirm_ts = None
                                 clear = LIVE_CLEAR_ATR * eq_l
                                 for c in candles[idx[live.ts]:]:
@@ -340,6 +373,7 @@ def find_potential(side: str,
                                         "mid_label": want,
                                         "second_ts": live.ts,
                                         "second_price": live.price,
+                                        "second_label": need,
                                         "confirm_ts": confirm_ts,
                                         "live": True,
                                     }

@@ -861,9 +861,9 @@ def _rearm_path():
     clears box_low + eq."""
     return (_line(100, 110.1, 12) + _line(110.1, 100, 12) +
             _line(100, 110, 12) + _line(110, 105, 8) +
-            _line(105, 110.4, 10) + _line(110.4, 105.5, 6) +
-            _line(105.5, 110.5, 8) + _line(110.5, 109, 2) +
-            _line(109, 106.2, 6) + _line(106.2, 110, 6))
+            _line(105, 110.4, 10) + _line(110.4, 106.2, 6) +
+            _line(106.2, 110.5, 8) + _line(110.5, 109, 2) +
+            _line(109, 107.3, 6) + _line(107.3, 110, 6))
 
 
 def test_one_potential_per_touch_rearm():
@@ -949,3 +949,54 @@ def test_rearm_fires_again_on_a_new_touch(cfg, monkeypatch):
                               now_s=NOW_S + 1200)
     assert a3 == [], "the same touch cannot fire a third time"
     assert len([ev for ev in inst.events if ev["kind"] == "potential"]) == 2
+
+
+# ── label gate: the third must BE a higher/lower low (PLUME case) ──────
+
+def test_confirmed_long_third_equal_low_is_rejected():
+    """Third clears box_low+eq but is EQUAL to the previous low (EL) —
+    that's a retest, not a higher low. Control fires with a real HL."""
+    eq_retest = (_line(100, 110, 12) + _line(110, 105, 8) +
+                 _line(105, 110.2, 8) + _line(110.2, 105.3, 6) +
+                 _line(105.3, 120, 14))         # 105.3 vs 105 = EL
+    assert fp(mk(eq_retest), "long") is None
+
+    real_hl = (_line(100, 110, 12) + _line(110, 105, 8) +
+               _line(105, 110.2, 8) + _line(110.2, 106.8, 6) +
+               _line(106.8, 120, 14))           # 106.8 vs 105 = HL
+    hit = fp(mk(real_hl), "long")
+    assert hit is not None
+    assert hit["second_label"] == "HL"
+
+
+def test_confirmed_short_third_equal_high_is_rejected():
+    """Third below box_top - eq but EQUAL to the previous high (EH) —
+    price retested the top, not a lower high. Control fires with a real LH."""
+    eq_retest = (_line(110, 100, 12) + _line(100, 105, 10) +
+                 _line(105, 100.2, 8) + _line(100.2, 105.0, 8) +
+                 _line(105.0, 96, 10))          # 105.0 vs H1 105 = EH
+    assert fp(mk(eq_retest), "short") is None
+
+    real_lh = (_line(110, 100, 12) + _line(100, 105, 10) +
+               _line(105, 100.2, 8) + _line(100.2, 103.0, 8) +
+               _line(103.0, 96, 10))            # 103 vs 105 = LH
+    hit = fp(mk(real_lh), "short")
+    assert hit is not None
+    assert hit["second_label"] == "LH"
+
+
+def test_live_short_third_equal_high_is_rejected():
+    """The LIVE route gets the same label gate: a provisional high equal
+    to the previous confirmed high (PLUME 0.01873 vs 0.01881, delta 0.5x
+    ATR) must NOT fire as a 'lower high'. The clear-gate passes, the
+    band passes (sloped line) — only the label blocks it."""
+    lo0, hi1, lo1, hi2 = 99.8, 105.0, 100.0, 104.9   # 104.9 vs H1 105 = EH
+    base = (_line(110, lo0, 12) + _line(lo0, hi1, 12) +
+            _line(hi1, lo1, 12) + _line(lo1, hi2, 8))
+    eq = _eq_at(base, len(base) - 1)
+    path = base + _line(hi2, hi2 - min(1.75 * eq + 0.1, 2.0), 6)
+    candles = mk(path, spread=1.0)
+    # zigzag never confirms the high -> only the live route could fire
+    from compression_detection.potential_break import _zigzag
+    assert all(abs(p.price - hi2) > 1e-9 for p in _zigzag(candles, CFG))
+    assert fp(candles, "short") is None

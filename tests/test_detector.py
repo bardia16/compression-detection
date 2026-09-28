@@ -98,6 +98,22 @@ def test_box_min_4_pivots():
     assert box.metrics["hit_boundary"] == "upper"
 
 
+def test_box_lines_are_horizontal():
+    """Boxes draw flat boundaries (user rule 2026-09-28): slope forced
+    to 0, value = mean of the side's pivots — no tilted fit."""
+    cands = detect([
+        ("H", 100.0, 10, None),
+        ("L", 90.0, 14, None),
+        ("H", 100.5, 18, "EH"),
+        ("L", 90.5, 22, "EL"),
+    ], last_bar=24)
+    box = [c for c in cands if c.type == TYPE_BOX][0]
+    assert box.upper.slope == 0.0
+    assert box.lower.slope == 0.0
+    assert abs(box.upper.intercept - 100.25) < 1e-9   # mean(100, 100.5)
+    assert abs(box.lower.intercept - 90.25) < 1e-9    # mean(90, 90.5)
+
+
 def test_box_larger_window_ranked_first():
     cands = detect([
         ("H", 100.0, 10, None),

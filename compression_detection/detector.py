@@ -301,10 +301,33 @@ def _check_window(
 
     upper_pts = [(r.abs_bar, r.price) for r in highs]
     lower_pts = [(r.abs_bar, r.price) for r in lows]
-    upper = st.fit_line(upper_pts)
-    lower = st.fit_line(lower_pts)
-    if upper is None or lower is None:
-        return None
+    if spec.name == TYPE_BOX:
+        # Boxes are HORIZONTAL (user rule 2026-09-28): a box is a flat
+        # range — each side's line is the mean of its pivots with slope
+        # forced to 0, never a tilted fit. Triangles keep fit_line.
+        # Flat-spread gate keeps the old slope rejection semantics: both
+        # sides must stay within flat_tol x ATR across their own span
+        # (a drifting side fails here instead of via slope_class).
+        def _spread_ok(pts):
+            vals = [p for _, p in pts]
+            bars = [b for b, _ in pts]
+            av = [atr14_series[b] for b in (bars[0], bars[-1])
+                  if b < len(atr14_series) and atr14_series[b]]
+            span_atr = max(av) if av else atr
+            return (max(vals) - min(vals)) <= cfg.flat_tol_atr * span_atr
+        if not _spread_ok(upper_pts) or not _spread_ok(lower_pts):
+            return None
+        upper = st.Line(slope=0.0,
+                        intercept=sum(p for _, p in upper_pts) / len(upper_pts),
+                        base_bar=0.0)
+        lower = st.Line(slope=0.0,
+                        intercept=sum(p for _, p in lower_pts) / len(lower_pts),
+                        base_bar=0.0)
+    else:
+        upper = st.fit_line(upper_pts)
+        lower = st.fit_line(lower_pts)
+        if upper is None or lower is None:
+            return None
 
     # Boundary respect for every pivot in the window (all pivots, both sides)
     up_flags = st.respects(upper_pts, upper, atr, cfg.boundary_tol_atr)

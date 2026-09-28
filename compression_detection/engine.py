@@ -5,6 +5,9 @@ grid): refresh universe → fetch closed candles per coin/TF → zigzag →
 labels → candidates → lifecycle pass → notifications (best-only dedupe)
 → persist state + write scan report.
 
+Proximity (every 60s): while price sits inside a trigger tf's close
+zone, the potential trigger is evaluated BETWEEN scans — scan cadence
+(15 min) would park a formed trigger for a full cycle (ONEUSDT case).
 Probe (every probe_loop_s): for each active instance whose current
 candle closes within probe_warn_s and not yet probed this candle, fetch
 the live price; if beyond a boundary → post the heads-up + chart.
@@ -43,7 +46,8 @@ from .lifecycle import (
     retire_out_of_universe, update_for_scan,
 )
 from .potential_break import (
-    LOWER_TF, POTENTIAL_FRESH_S, find_potential, potential_lines,
+    LOWER_TF, POTENTIAL_FRESH_S, PROX_BAND_ATR, find_potential,
+    potential_lines,
 )
 from .report import build_summary, format_summary_text, write_report
 from .timing import next_scan_ms, probe_due
@@ -57,6 +61,11 @@ CHART_SPACING_S = 1.5          # min gap between chart-server requests
 CHART_RETRY_DELAY_S = 3.0      # one retry before the text-only fallback (chart
                                # service 503s transiently during scan bursts)
 UNIVERSE_AVAIL_TTL = 6 * 3600  # exchangeInfo cache
+# Fast potential path (user rule 2026-09-28): while price sits in a
+# trigger tf's close zone the trigger is checked every minute — scan
+# cadence (15 min) would park a formed trigger for a full cycle
+# (ONEUSDT: box 10:01, potential 10:16).
+PROXIMITY_POLL_S = 60
 
 # DM mirror (user rule 2026-09-20): ascending/descending triangle alerts are
 # ALSO sent to Bardia's DM, in addition to the channel. Chat id comes from
@@ -77,6 +86,10 @@ class Engine:
         self._available_ts = 0.0
         self._chart_sem = asyncio.Semaphore(2)
         self._chart_last = 0.0
+        # last scan's candles per (symbol, tf) — the fast proximity pass
+        # reads bands/ATRs from it between scans (candles are refreshed
+        # every scan; in-zone tfs get a FRESH fetch before evaluation)
+        self._last_candles: Dict[tuple, list] = {}
         if not dry_run:
             self._load_state()
 
@@ -286,6 +299,8 @@ class Engine:
                             "symbol": sym, "tf": tf,
                             "candidates": [c.to_dict() for c in r["candidates"][:8]],
                         })
+            # kept for the fast proximity pass between scans
+            self._last_candles = dict(candles_by_key)
 
             # pass C — lifecycle: close verdicts, continuation/invalidation,
             # new instances (this is where a triangle replaces the box).
@@ -343,12 +358,12 @@ class Engine:
     # ── potential break ─────────────────────────────────────────────────
     def _potential_actions(self, instances, candles_by_key: Dict[tuple, list],
                            now_s: int) -> List[Action]:
-        """Potential-break pattern pass (user rules 2026-09-27).
+        """Potential-break pass (user rule 2026-09-28, trigger rewrite).
 
-        Active BOXES only. The touch lives in the BOX tf OR the tf below
-        it (confirmed EH/EL on the line); the confirming swing may sit on
-        the box tf or one tf below (lower tf first — its alert carries
-        both charts).
+        Active BOXES only. find_potential checks every trigger tf — the
+        box's lower tfs (nearest first) PLUS the box's own tf — for the
+        EH/EL-at-boundary + HL/LH pattern inside the per-tf 1.5 ATR close
+        zone; the alert names the box tf and the tf that triggered.
 
         ONE alert PER TOUCH (user rule 2026-09-27 evening): a touch
         authorizes exactly one higher low / lower high. The touch ts used
@@ -365,20 +380,11 @@ class Engine:
         for inst in list(instances.values()):
             if inst.type != "box" or inst.state in TERMINAL_STATES:
                 continue
-            # The box's boundary lines are the ONLY reference the pattern is
-            # judged against (user rule 2026-09-27, XPL case). Lines live in
-            # the BOX tf's bar space; a stored pivot carries both ts and bar,
-            # so bar(ts) = ref_bar + (ts - ref_ts) / tf_ms lets us evaluate
-            # them for the scanned tf too. No lines -> no pattern.
-            ref = inst.pivots[0] if inst.pivots else None
-            tf_ms = TF_MS.get(inst.tf)
-            if ref is None or not tf_ms or ref.get("bar") is None:
+            # The box's boundary lines are the ONLY reference the pattern
+            # is judged against (user rule 2026-09-27, XPL case).
+            box_at = self._box_at_fn(inst)
+            if box_at is None:
                 continue
-
-            def box_at(ts, _ref=ref, _ms=tf_ms, _u=inst.upper_line,
-                       _l=inst.lower_line):
-                bar = _ref["bar"] + (ts - _ref["ts"]) / _ms
-                return (_u.at(bar), _l.at(bar))
 
             # scan preference: the box's lower tfs nearest-first, then
             # the box's own tf (user rule 2026-09-28: 1h -> [15m],
@@ -423,18 +429,40 @@ class Engine:
             # ONE per box: the freshest confirmation wins (a tie keeps the
             # earlier list order — long first).
             hits.sort(key=lambda h: h["confirm_ts"], reverse=True)
-            win = hits[0]
-            side = win["side"]
-            for s in ("long", "short"):
-                inst.notified[f"potential_{s}"] = True
-            inst.notified[f"potential_{side}_touch_ts"] = win["touch_ts"]
-            inst.add_event("potential", now_s, side=side,
-                           pattern_tf=win["pattern_tf"],
-                           mid=win["mid_price"],
-                           second=win["second_price"],
-                           confirm_ts=win["confirm_ts"])
-            out.append(Action("potential_break", inst, dict(win)))
+            out.append(self._register_potential(inst, hits[0], now_s))
         return out
+
+    @staticmethod
+    def _box_at_fn(inst):
+        """ts -> (upper, lower) in the BOX tf's bar space (lines live in
+        bar coordinates; bar(ts) = ref_bar + (ts - ref_ts) / tf_ms).
+        None when the instance carries no usable reference pivot."""
+        ref = inst.pivots[0] if inst.pivots else None
+        tf_ms = TF_MS.get(inst.tf)
+        if ref is None or not tf_ms or ref.get("bar") is None:
+            return None
+        u, l = inst.upper_line, inst.lower_line
+
+        def box_at(ts, _ref=ref, _ms=tf_ms, _u=u, _l=l):
+            bar = _ref["bar"] + (ts - _ref["ts"]) / _ms
+            return (_u.at(bar), _l.at(bar))
+        return box_at
+
+    @staticmethod
+    def _register_potential(inst, win: dict, now_s: int) -> "Action":
+        """Arm the touch, stamp both sides spent, record the event — the
+        single write path shared by the scan pass and the fast
+        proximity pass (user rule 2026-09-28)."""
+        side = win["side"]
+        for s in ("long", "short"):
+            inst.notified[f"potential_{s}"] = True
+        inst.notified[f"potential_{side}_touch_ts"] = win["touch_ts"]
+        inst.add_event("potential", now_s, side=side,
+                       pattern_tf=win["pattern_tf"],
+                       mid=win["mid_price"],
+                       second=win["second_price"],
+                       confirm_ts=win["confirm_ts"])
+        return Action("potential_break", inst, dict(win))
 
     @staticmethod
     def _drop_moot_potential(raw_actions: List[Action]) -> List[Action]:
@@ -811,6 +839,136 @@ class Engine:
             except Exception as exc:
                 log.error("scan failed: %s", exc, exc_info=True)
 
+    # ── fast proximity pass (user rule 2026-09-28) ────────────────────
+    async def _proximity_pass(self, ses) -> List[dict]:
+        """Evaluate the potential trigger every PROXIMITY_POLL_S instead of
+        waiting for the next scan. Bands/ATRs come from the last scan's
+        cached candles; a tf inside the zone gets a FRESH fetch before the
+        trigger is judged (the HL may have just printed)."""
+        sends: List[dict] = []
+        pending = []
+        for inst in self.instances.values():
+            if inst.type != "box" or inst.state in TERMINAL_STATES:
+                continue
+            live_sides = []
+            for side in ("long", "short"):
+                spent = inst.notified.get(f"potential_{side}_touch_ts")
+                if spent is None and inst.notified.get(f"potential_{side}"):
+                    continue          # pre-touch flag — one-shot, spent
+                live_sides.append(side)
+            if live_sides:
+                pending.append((inst, live_sides))
+        if not pending:
+            return sends
+
+        prices: Dict[str, float] = {}
+        for sym in sorted({i.symbol for i, _ in pending}):
+            prices[sym] = await fetch_last_price(ses, sym)
+
+        now_s = int(time.time())
+        fresh_s = (now_s - POTENTIAL_FRESH_S) * 1000
+        for inst, live_sides in pending:
+            price = prices.get(inst.symbol) or 0.0
+            if price <= 0:
+                continue
+            box_at = self._box_at_fn(inst)
+            if box_at is None:
+                continue
+            tfs = [*LOWER_TF.get(inst.tf, []), inst.tf]
+
+            # per-tf close-zone pre-gate on the cached candles
+            near: Dict[str, List[str]] = {}
+            for tf in tfs:
+                cached = self._last_candles.get((inst.symbol, tf))
+                if not cached:
+                    continue
+                a14 = atr_series(cached, self.cfg.atr14_length,
+                                 self.cfg.atr14_method)
+                if not a14 or not a14[-1]:
+                    continue
+                band = PROX_BAND_ATR * a14[-1]
+                up, lo = box_at(cached[-1].ts)
+                sides = []
+                if "long" in live_sides and up is not None \
+                        and up - band <= price <= up:
+                    sides.append("long")
+                if "short" in live_sides and lo is not None \
+                        and lo <= price <= lo + band:
+                    sides.append("short")
+                if sides:
+                    near[tf] = sides
+            if not near:
+                continue
+
+            # in zone somewhere: fresh candles for the zone tfs + own tf
+            fresh: Dict[str, list] = {}
+            for tf in dict.fromkeys([*near, inst.tf]):
+                try:
+                    fresh[tf] = await fetch_klines(
+                        ses, inst.symbol, tf, self.cfg.candle_limit)
+                except Exception as exc:
+                    log.warning("proximity fetch %s %s failed: %s",
+                                inst.symbol, tf, exc)
+                    fresh[tf] = None
+            if not fresh.get(inst.tf):
+                continue
+            scan = [(tf, fresh[tf]) for tf in tfs
+                    if tf != inst.tf and fresh.get(tf)]
+
+            hits = []
+            for side in sorted({s for ss in near.values() for s in ss}):
+                spent = inst.notified.get(f"potential_{side}_touch_ts")
+                if spent is None and inst.notified.get(f"potential_{side}"):
+                    continue
+                hit = find_potential(side, fresh[inst.tf], scan, self.cfg,
+                                     main_tf=inst.tf,
+                                     anchor_ts=inst.anchor_ts,
+                                     box_at=box_at, touch_atr=inst.atr,
+                                     since_touch_ts=spent or 0,
+                                     live_price=price)
+                if hit is None:
+                    continue
+                if spent is not None and hit["touch_ts"] <= spent:
+                    continue
+                if hit["confirm_ts"] < fresh_s:
+                    continue
+                hit["side"] = side
+                hits.append(hit)
+            if not hits:
+                continue
+
+            hits.sort(key=lambda h: h["confirm_ts"], reverse=True)
+            win = hits[0]
+            # re-check AFTER the awaits — a scan may have spent this touch
+            side = win["side"]
+            spent = inst.notified.get(f"potential_{side}_touch_ts")
+            if spent is None and inst.notified.get(f"potential_{side}"):
+                continue
+            if spent is not None and win["touch_ts"] <= spent:
+                continue
+            action = self._register_potential(inst, win, now_s)
+            sends.extend(await self._dispatch(
+                [action], ses, dict(fresh)))
+            self._save_state()
+        return sends
+
+    async def _proximity_loop(self, stop: asyncio.Event,
+                              ses: aiohttp.ClientSession) -> None:
+        while not stop.is_set():
+            try:
+                sends = await self._proximity_pass(ses)
+                if sends:
+                    log.info("proximity pass: %d potential send(s)",
+                             len(sends))
+            except Exception as exc:
+                log.error("proximity pass failed: %s", exc, exc_info=True)
+            try:
+                await asyncio.wait_for(stop.wait(),
+                                       timeout=PROXIMITY_POLL_S)
+                return
+            except asyncio.TimeoutError:
+                pass
+
     async def _probe_loop(self, stop: asyncio.Event, ses: aiohttp.ClientSession) -> None:
         while not stop.is_set():
             try:
@@ -845,9 +1003,11 @@ class Engine:
             await self.scan_once()
             scan_task = asyncio.create_task(self._scan_loop(stop))
             probe_task = asyncio.create_task(self._probe_loop(stop, ses))
+            prox_task = asyncio.create_task(self._proximity_loop(stop, ses))
             await stop.wait()
             scan_task.cancel()
             probe_task.cancel()
+            prox_task.cancel()
         log.info("engine stopped")
 
 

@@ -1,68 +1,35 @@
-"""Potential-break confirmation pattern (user rules 2026-09-27, final).
+"""Potential-break detection (user rule 2026-09-28 — trigger rewrite).
 
-Two steps, both anchored on the BOX (never on a neighbouring pivot of the
-scanned timeframe):
+A pattern needs a BOX first. From there the alert is a per-tf TRIGGER:
 
-STEP 1 — the TOUCH (main tf OR lower tf, user rule 2026-09-27 evening):
-    the box side is touched by a CONFIRMED EH (long) / EL (short) sitting
-    on the box line (± the box's ATR), on the box's own timeframe or on
-    the timeframe below it. Touches are collected from both and the
-    freshest qualifying one arms the pattern (main tf wins a ts tie).
-STEP 2 — the CONFIRMING swing may live in the MAIN tf or the LOWER tf and
-    must clear the EQUALITY threshold against the OTHER box side:
-    LONG : a confirmed low  > box_low  + eq    ("higher than the low of
-           box, exceeding the equal threshold")
-    SHORT: a confirmed high < box_high − eq
-    eq = ATR14 of the scanned tf (the same band EL/EL labels are built
-    from).
-    AND the swing must actually BE a higher low / lower high (label gate,
-    user rule 2026-09-27 — PLUME fired an EQUAL high 0.5x ATR under the
-    previous high as a "lower high", the band check only passed because
-    the sloped line sat above the swing): LONG third -> label HL, SHORT
-    third -> label LH, computed on the third's own tf. The LIVE third is
-    labeled the same way (provisional appended to the confirmed sequence)
-    — no label, no alert.
+  trigger tfs   = the box's LOWER tfs, nearest first, PLUS the box's own
+                  tf (engine scan list: 1h -> [15m, 1h], 4h -> [1h, 15m,
+                  4h], 1d -> [4h, 1h, 15m, 1d]).
 
-ONE alert PER TOUCH (user rule 2026-09-27 evening): a touch authorizes
-exactly ONE higher low / lower high; the engine stores the touch ts it
-fired with and calls back with `since_touch_ts`, so the next alert needs
-a strictly NEWER touch first — no HL-beats-HL comparison, no cooldown,
-the touch→swing pairing is the whole structure.
+  close zone    = price within PROX_BAND_ATR (1.5) x ATR14 of the boundary,
+                  evaluated PER TF with that tf's own ATR ("their 1.5 atr
+                  range") — and never past the line (a close beyond it
+                  belongs to the breakout verdict).
 
-Positional freshness of the touch (user rule 2026-09-27):
-    · touch on the MAIN tf, third on the LOWER tf -> the touch must be
-      the LAST confirmed pivot of the main tf (nothing superseded it)
-    · touch on the MAIN tf, third on the MAIN tf -> the pivot right
-      BEFORE the third must be the touch (and the third is last main)
-    · touch on the LOWER tf -> no pivot on the touch's own tf may sit
-      between the touch and the third (adjacency); a main-tf third must
-      additionally be the last main pivot.
+  trigger       = on that tf, the LAST TWO pivots are
+                    LONG : HIGH labeled EH at the boundary, then LOW  HL
+                    SHORT: LOW  labeled EL at the boundary, then HIGH LH
+                  the swing needs NO confirmation — the LIVE provisional
+                  counts as long as it carries the HL/LH label (a
+                  confirmed swing is fine too). Adjacency is positional:
+                  nothing may sit between the two pivots.
 
-STEP 2 has two confirmation routes (loosened 2026-09-27, PENDLE case):
-    · CONFIRMED third swing — the alert lands on the candle that confirmed
-      it (`_confirm_map`), as before.
-    · LIVE third swing — when the zigzag threshold (1.2 x ATR7) is
-      inflated by earlier volatility it can exceed the whole box height,
-      so a valid higher low only "confirms" ON the breakout candle and
-      `_drop_moot_potential` eats the alert. Accept the UNCONFIRMED
-      extreme instead once a CLOSE has displaced LIVE_CLEAR_ATR (1.75,
-      user choice 2026-09-27 EIGEN/XLM: 1x fired on the first chop) x
-      ATR14 of the swing bar beyond it in the potential direction;
-      `confirm_ts` is that candle. Positional freshness: main-tf touch
-      must still be the LAST confirmed main-tf pivot; a lower-tf touch
-      lives only with a same-tf live third (no pivot between them on the
-      touch's tf). A confirmed hit always wins when both qualify.
+Any trigger tf passing sends ONE alert (freshest swing wins) — the caption
+states the box tf and the tf the break was found on ("4H box · break at
+1H").
 
-Why the shape changed (XPL/PIEVERSE, 2026-09-27): the earlier
-"mid touches the line, third sits on the other line" rule compared nothing
-to the equality band, and a lower-tf candidate could fire while the main tf
-had already moved on — PIEVERSE printed a short 5 seconds after its long.
+Kept guards: box lines required (fail closed), one alert per touch (the
+EH/EL armed via since_touch_ts), anchor_ts, POTENTIAL_FRESH_S freshness
+on the swing.
 
-`box_at` (ts -> (upper, lower)) and `touch_atr` come from the engine, which
-owns the Instance and its Line objects — no box lines, no pattern (fail
-closed).  `LOWER_TF` maps a box tf to its lower tfs, nearest first
-(user rule 2026-09-28: detection runs on 1h/4h/1d only; 15m exists
-purely as a potential lower tf and never carries its own pattern).
+`touch_atr` stays in the signature for compatibility; the band is the
+per-tf PROX_BAND_ATR x ATR14 now. `live_price` lets the fast proximity
+pass (60s poll) override the last closed close.
 """
 from __future__ import annotations
 
@@ -85,41 +52,16 @@ LOWER_TF: Dict[str, List[str]] = {
     "1d": ["4h", "1h", "15m"],
 }
 
-# Freshness window (user choice 2026-09-27): a confirmation older than this
-# is old news — the scan would otherwise backfill patterns that completed
+# Close-zone / boundary-touch band per trigger tf (user rule
+# 2026-09-28): price AND the EH/EL touch sit within 1.5 x ATR14 of
+# that tf's boundary line.
+PROX_BAND_ATR = 1.5
+
+# Freshness window (user choice 2026-09-27): a swing older than this
+# is old news — the pass would otherwise backfill patterns that completed
 # days before the box was even detected (PIEVERSE/BANK case: 3 of the 11
 # first-scan hits were 4-5 days stale).
 POTENTIAL_FRESH_S = 12 * 3600
-
-# float slack for comparisons against a line value (a line fitted through
-# the pivot differs from the pivot price by ~1e-17).
-LINE_EPS_REL = 1e-9
-
-# Displacement the close must show beyond the LIVE third swing in the
-# potential direction before the alert means anything (user choice
-# 2026-09-27, EIGEN/XLM case: the first dip past 1x eq fired while price
-# kept chopping — "the price should still move a bit in the potential
-# direction"). 1.75 x ATR14 of the swing bar: blocks EIGEN (1.58x) and
-# XLM (1.52x), keeps PENDLE (budget 1.92x) firing pre-breakout, and sits
-# at zigzag-grade displacement so the confirmed route can't bypass it
-# with a smaller move. Confirmed-route alerts keep the original spec.
-LIVE_CLEAR_ATR = 1.75
-
-
-def _confirm_map(candles: List[Candle], cfg) -> Dict[int, int]:
-    """pivot ts -> ts of the candle that CONFIRMED it.
-
-    `ZigZag.feed_all` only yields confirmed pivots and stamps them with the
-    pivot bar; replaying `feed` one candle at a time surfaces the confirming
-    candle, which is what the alert fires on.
-    """
-    zz = ZigZag(coef=cfg.zigzag_coef, atr_length=cfg.zigzag_atr_length)
-    out: Dict[int, int] = {}
-    for c in candles:
-        p = zz.feed(c)
-        if p is not None:
-            out[p.ts] = c.ts
-    return out
 
 
 def _zigzag(candles: List[Candle], cfg):
@@ -134,12 +76,6 @@ def _provisional(candles: List[Candle], cfg):
     return zz.provisional
 
 
-def _between(pivots: Sequence, a_ts: int, b_ts: int) -> bool:
-    """True when a pivot of that tf sits STRICTLY between a and b — the
-    adjacency guard for lower-tf touches (nothing moved in between)."""
-    return any(a_ts < p.ts < b_ts for p in pivots)
-
-
 def find_potential(side: str,
                    main_candles: List[Candle],
                    scan: Sequence[Tuple[str, List[Candle]]],
@@ -149,30 +85,27 @@ def find_potential(side: str,
                    anchor_ts: Optional[int] = None,
                    box_at=None,
                    touch_atr: Optional[float] = None,
-                   since_touch_ts: int = 0) -> Optional[dict]:
-    """Latest matching pattern for `side` newer than `since_touch_ts`,
-    or None (see module docstring).
+                   since_touch_ts: int = 0,
+                   live_price: Optional[float] = None) -> Optional[dict]:
+    """New trigger logic (user rule 2026-09-28, see module docstring).
 
-    main_candles  candles of the box's own timeframe
-    scan          [(tf, candles), ...] in preference order — the engine
-                  passes the lower tf first, the main tf last
-    since_touch_ts  touches at or before this ts are SPENT (the engine
-                  stores the ts of the touch it fired with; a strictly
-                  newer touch re-arms the side — one alert per touch)
+    Checks every trigger tf (lower tfs nearest-first + the box's own tf)
+    independently and returns the FRESHEST passing hit, or None.
+    touch_atr is accepted but unused — the band is per-tf
+    PROX_BAND_ATR x ATR14 now.
     """
     if side not in ("long", "short"):
         raise ValueError(f"side must be long|short, got {side!r}")
+    # fail closed on BOTH contract params — no lines, no pattern (the
+    # touch_atr value itself is unused since the per-tf band took over,
+    # but a caller missing it is not running the contract)
     if box_at is None or touch_atr is None:
         return None
     if not main_candles:
         return None
 
-    want = "EH" if side == "long" else "EL"
-    main_a14 = atr_series(main_candles, cfg.atr14_length, cfg.atr14_method)
-    main_lab = label_all_pivots(_zigzag(main_candles, cfg), main_a14)
-    main_pivots = [p for p, _ in main_lab]
-    if len(main_pivots) < 2:
-        return None
+    want = "EH" if side == "long" else "EL"      # the touch at the boundary
+    need = "HL" if side == "long" else "LH"      # the swing after it
 
     def lines(ts):
         try:
@@ -181,256 +114,99 @@ def find_potential(side: str,
             return None, None
         return (up, lo) if up is not None and lo is not None else (None, None)
 
-    # ── STEP 1: touches on the line — main tf AND lower tf ──────────────
-    srcs: List[Tuple[str, List[Candle]]] = [(main_tf, main_candles)]
-    seen = {main_tf}
+    # trigger tfs: engine scan order (lower nearest-first, own tf last);
+    # own tf always participates even if a caller forgot it (tests).
+    srcs: List[Tuple[str, List[Candle]]] = []
+    seen = set()
     for tf, candles in scan:
-        if tf in seen or not candles or len(candles) < cfg.atr14_length + 6:
-            continue
-        seen.add(tf)
-        srcs.append((tf, candles))
+        if (tf and candles and tf not in seen
+                and len(candles) >= cfg.atr14_length + 6):
+            srcs.append((tf, candles))
+            seen.add(tf)
+    if main_tf not in seen and len(main_candles) >= cfg.atr14_length + 6:
+        srcs.append((main_tf, main_candles))
 
-    labs: Dict[str, list] = {}
-    touches: list = []          # (ts, -main_rank, tf, pivot); main wins ties
+    hits: List[dict] = []
     for tf, candles in srcs:
-        if tf == main_tf:
-            lab = main_lab
-        else:
-            lab = label_all_pivots(
-                _zigzag(candles, cfg),
-                atr_series(candles, cfg.atr14_length, cfg.atr14_method))
-        labs[tf] = lab
-        for p, l in lab:
-            if l is None or l.name != want or p.ts <= since_touch_ts:
-                continue
-            up, lo = lines(p.ts)
-            if up is None:
-                continue
-            side_line = up if side == "long" else lo
-            if abs(p.price - side_line) <= touch_atr:
-                touches.append((p.ts, 0 if tf == main_tf else 1, tf, p, False))
+        a14 = atr_series(candles, cfg.atr14_length, cfg.atr14_method)
+        if not a14 or not a14[-1]:
+            continue
+        band = PROX_BAND_ATR * a14[-1]       # this tf's own close zone
 
-    # ── LIVE main-tf touch (user choice 2026-09-28, option A / SAND) ───
-    # The touch's own confirm was the slow gate: SAND's pattern completed
-    # 04:00, the touch (a box's 4th pivot) confirmed 07:30, the box was
-    # detected 08:31 and the alert went out 08:44 — the pullback was long
-    # over. The provisional extreme, once structurally EH/EL ON the line,
-    # is the touch NOW; if it never confirms, it stops qualifying on its
-    # own (price runs off the line or the label changes).
-    prov = _provisional(main_candles, cfg)
-    if (prov is not None and main_pivots
-            and prov.ts not in {p.ts for p in main_pivots}
-            and prov.ts > since_touch_ts):
-        lab_full = label_all_pivots(list(main_pivots) + [prov], main_a14)
-        if (lab_full and lab_full[-1][0].ts == prov.ts
-                and lab_full[-1][1] is not None
-                and lab_full[-1][1].name == want):
-            up, lo = lines(prov.ts)
-            side_line = up if side == "long" else lo
-            if (side_line is not None
-                    and abs(prov.price - side_line) <= touch_atr):
-                touches.append((prov.ts, 0, main_tf, prov, True))
-    if not touches:
+        pivots = _zigzag(candles, cfg)
+        confirmed = list(label_all_pivots(pivots, a14))
+        # TWO candidate tails: the confirmed last-two (a live bounce-high
+        # printed after the swing must not hide a valid EH+HL pair) and
+        # the confirmed+provisional tail (the SWING itself still live).
+        tails: List[tuple] = []
+        if len(confirmed) >= 2:
+            tails.append((confirmed[-2:], None))
+        prov = _provisional(candles, cfg)
+        if prov is not None and pivots \
+                and prov.ts not in {p.ts for p in pivots}:
+            full = label_all_pivots(list(pivots) + [prov], a14)
+            if full and full[-1][0].ts == prov.ts and full[-1][1] is not None:
+                tails.append((full[-2:], prov.ts))
+
+        for tail, live_ts in tails:
+            # adjacency: the tail's LAST TWO pivots are the trigger
+            (p_a, l_a), (p_b, l_b) = tail
+            if side == "long":
+                if not (p_a.is_high and not p_b.is_high):
+                    continue
+            else:
+                if not (not p_a.is_high and p_b.is_high):
+                    continue
+            if l_a is None or l_a.name != want:
+                continue
+            if l_b is None or l_b.name != need:
+                continue
+
+            # the touch sits AT the boundary (same per-tf band)
+            up, lo = lines(p_a.ts)
+            line = up if side == "long" else lo
+            if line is None:
+                continue
+            if abs(p_a.price - line) > band:
+                continue
+
+            # close zone: price in [line - band, line], never past the line
+            price = live_price if live_price is not None else candles[-1].close
+            if side == "long":
+                if price > line or price < line - band:
+                    continue
+            else:
+                if price < line or price > line + band:
+                    continue
+
+            # one alert per touch + box anchor
+            if p_a.ts <= since_touch_ts:
+                continue
+            if anchor_ts is not None and p_b.ts < anchor_ts:
+                continue
+
+            hits.append({
+                "side": side,
+                "pattern_tf": tf,
+                "touch_ts": p_a.ts,
+                "touch_price": p_a.price,
+                "touch_label": want,
+                "touch_tf": tf,
+                "first_ts": p_a.ts,       # kept for chart/caption compat
+                "first_price": p_a.price,
+                "mid_ts": p_a.ts,         # the touch IS the mid pivot
+                "mid_price": p_a.price,
+                "mid_label": want,
+                "second_ts": p_b.ts,
+                "second_price": p_b.price,
+                "second_label": need,
+                "confirm_ts": p_b.ts,     # swing recency (freshness/order)
+                "live": bool(live_ts and p_b.ts == live_ts),
+            })
+
+    if not hits:
         return None
-    touches.sort(key=lambda t: (t[0], -t[1]), reverse=True)  # freshest first
-    pivots_by_tf: Dict[str, list] = {
-        tf: [p for p, _ in lab] for tf, lab in labs.items()}
-
-    def _third_for(touch, touch_tf: str,
-                   touch_is_live: bool = False) -> Optional[dict]:
-        """STEP 2 for one candidate touch (see module docstring)."""
-        touch_is_main = touch_tf == main_tf
-        hit: Optional[dict] = None
-        for tf, candles in scan:
-            if not candles or len(candles) < cfg.atr14_length + 6:
-                continue
-            pivots = _zigzag(candles, cfg)
-            a14 = atr_series(candles, cfg.atr14_length, cfg.atr14_method)
-            confirms = _confirm_map(candles, cfg)
-            idx = {c.ts: i for i, c in enumerate(candles)}
-            main_seq = tf == main_tf
-            last_main = main_pivots[-1] if main_pivots else None
-            need = "HL" if side == "long" else "LH"
-            # structural label of every confirmed pivot on this tf
-            # (unlabelable pivots are omitted by label_all_pivots -> None)
-            p_lab = {p.ts: (l.name if l else None)
-                     for p, l in label_all_pivots(pivots, a14)}
-
-            for i, p in enumerate(pivots):
-                if p.ts <= touch.ts or p.ts not in idx:
-                    continue
-                eq = a14[idx[p.ts]]
-                if eq is None or eq <= 0:
-                    continue
-                up, lo = lines(p.ts)
-                if up is None or lo is None:
-                    continue
-                if side == "long":
-                    if p.is_high:
-                        continue
-                    # higher than the box low, CLEARING the equality band
-                    if not p.price > lo + eq:
-                        continue
-                else:
-                    if not p.is_high:
-                        continue
-                    # lower than the box high, CLEARING the equality band
-                    if not p.price < up - eq:
-                        continue
-                # label gate (user rule 2026-09-27, PLUME case): the band
-                # check compares against the (possibly sloped) BOX LINE —
-                # the swing can clear it while sitting EQUAL to the
-                # previous same-side pivot, which is not a higher/lower
-                # high at all. Require the structural label on the
-                # pattern's own tf.
-                if p_lab.get(p.ts) != need:
-                    continue
-
-                # positional freshness of the touch (user rule 2026-09-27)
-                if main_seq:
-                    # third must be the LAST main pivot
-                    if last_main is None or last_main.ts != p.ts or i == 0:
-                        continue
-                    if touch_is_main:
-                        # touch right before the third
-                        if main_pivots[-2].ts != touch.ts:
-                            continue
-                    else:
-                        # lower-tf touch: nothing on ITS tf between them
-                        if _between(pivots_by_tf.get(touch_tf, []),
-                                    touch.ts, p.ts):
-                            continue
-                else:
-                    if touch_is_main:
-                        # the touch must still be the last main-tf pivot.
-                        # A LIVE touch is never a confirmed pivot — its
-                        # freshness is "nothing confirmed has superseded
-                        # it": every confirmed main pivot predates it.
-                        if last_main is None:
-                            continue
-                        if touch_is_live:
-                            if last_main.ts >= touch.ts:
-                                continue
-                        elif last_main.ts != touch.ts:
-                            continue
-                    else:
-                        # lower-tf touch: adjacency on the touch's own tf
-                        if _between(pivots_by_tf.get(touch_tf, []),
-                                    touch.ts, p.ts):
-                            continue
-
-                conf = confirms.get(p.ts)
-                if conf is None:
-                    continue
-                if anchor_ts is not None and conf < anchor_ts:
-                    continue
-                hit = {
-                    "side": side,
-                    "pattern_tf": tf,
-                    "touch_ts": touch.ts,
-                    "touch_price": touch.price,
-                    "touch_label": want,
-                    "touch_tf": touch_tf,
-                    "first_ts": touch.ts,        # kept for chart/caption compat
-                    "first_price": touch.price,
-                    "mid_ts": touch.ts,          # the touch IS the mid pivot
-                    "mid_price": touch.price,
-                    "mid_label": want,
-                    "second_ts": p.ts,
-                    "second_price": p.price,
-                    "second_label": need,
-                    "confirm_ts": conf,
-                }
-
-            # ── LIVE third swing (loosened 2026-09-27, PENDLE case) ─────
-            # The zigzag confirm (1.2 x ATR7) can be wider than the box
-            # itself after a volatile leg: PENDLE's higher low needed close
-            # > 2.648 while the whole box was 2.58-2.655, so it only
-            # confirmed on the breakout candle and the same-scan breakout
-            # dropped the alert. Route: the UNCONFIRMED extreme, once a
-            # CLOSE has displaced LIVE_CLEAR_ATR x ATR14 beyond it.
-            if hit is None:
-                if touch_is_main:
-                    if touch_is_live:
-                        live_ok = (last_main is not None
-                                   and last_main.ts < touch.ts)
-                    else:
-                        live_ok = (last_main is not None
-                                   and last_main.ts == touch.ts)
-                else:
-                    # lower-tf touch lives only with a same-tf live third
-                    live_ok = tf == touch_tf
-                if live_ok:
-                    live = _provisional(candles, cfg)
-                    if (live is not None and touch.ts < live.ts
-                            and live.ts in idx
-                            and not _between(pivots_by_tf.get(touch_tf, []),
-                                             touch.ts, live.ts)):
-                        eq_l = a14[idx[live.ts]]
-                        if eq_l is not None and eq_l > 0:
-                            up_l, lo_l = lines(live.ts)
-                            band_ok = False
-                            if up_l is not None and lo_l is not None:
-                                if side == "long":
-                                    band_ok = (not live.is_high
-                                               and live.price > lo_l + eq_l)
-                                else:
-                                    band_ok = (live.is_high
-                                               and live.price < up_l - eq_l)
-                            if band_ok:
-                                # label gate for the LIVE swing too: append the
-                                # provisional to the confirmed sequence and require
-                                # HL (long) / LH (short) — an equal live swing is
-                                # a retest, not a higher/lower high (PLUME case).
-                                full_lab = label_all_pivots(list(pivots) + [live],
-                                                            a14)
-                                band_ok = bool(
-                                    full_lab
-                                    and full_lab[-1][0].ts == live.ts
-                                    and full_lab[-1][1] is not None
-                                    and full_lab[-1][1].name == need)
-                            if band_ok:
-                                confirm_ts = None
-                                clear = LIVE_CLEAR_ATR * eq_l
-                                for c in candles[idx[live.ts]:]:
-                                    if (side == "long"
-                                            and c.close > live.price + clear):
-                                        confirm_ts = c.ts
-                                        break
-                                    if (side == "short"
-                                            and c.close < live.price - clear):
-                                        confirm_ts = c.ts
-                                        break
-                                if confirm_ts is not None and (
-                                        anchor_ts is None
-                                        or confirm_ts >= anchor_ts):
-                                    hit = {
-                                        "side": side,
-                                        "pattern_tf": tf,
-                                        "touch_ts": touch.ts,
-                                        "touch_price": touch.price,
-                                        "touch_label": want,
-                                        "touch_tf": touch_tf,
-                                        "first_ts": touch.ts,
-                                        "first_price": touch.price,
-                                        "mid_ts": touch.ts,
-                                        "mid_price": touch.price,
-                                        "mid_label": want,
-                                        "second_ts": live.ts,
-                                        "second_price": live.price,
-                                        "second_label": need,
-                                        "confirm_ts": confirm_ts,
-                                        "live": True,
-                                    }
-            if hit is not None:
-                return hit     # preference order: lower tf first
-        return None
-
-    for _, _, touch_tf, touch, touch_live in touches:  # freshest that works
-        hit = _third_for(touch, touch_tf, touch_live)
-        if hit is not None:
-            return hit
-    return None
+    return max(hits, key=lambda h: h["confirm_ts"])   # freshest wins
 
 
 def potential_lines(hit: dict, box_lo: Optional[float],

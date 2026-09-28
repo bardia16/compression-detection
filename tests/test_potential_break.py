@@ -1,14 +1,23 @@
-"""Potential-break confirmation pattern (user rule 2026-09-27).
+"""Potential-break trigger (user rule 2026-09-28 — rewrite).
 
-  LONG : low  → EH (box high)  → higher low, confirmed
-  SHORT: high → EL (box low)   → lower high, confirmed
+  LONG : [box exists] + on a trigger tf: EH at the boundary, then a
+         higher low (live OR confirmed), price inside that tf's
+         1.5×ATR14 close zone, never past the line
+  SHORT: mirror — EL at the boundary, then a lower high, zone above
 
-Detection is exercised on synthetic zigzag-friendly paths (each leg ≈ 10
-ATR so coef × ATR7 confirms unambiguously), the engine pass on real
-Config, and the dispatch with a fake Telegram + chart stub.
+Trigger tfs = the box's lower tfs (nearest first) + the box's own tf;
+ANY tf passing sends one alert (freshest swing wins), the caption names
+both frames ("4H box · break at 1H"). Touch AND swing come from the
+SAME tf — no cross-tf pairing.
+
+Exercised on synthetic zigzag-friendly paths (each leg ≈ 10 ATR so
+coef × ATR7 confirms unambiguously), the engine pass on real Config,
+the fast 60s proximity pass with stubbed fetches, and the dispatch
+with a fake Telegram + chart stub.
 """
 import asyncio
 import sys
+import types
 
 import pytest
 
@@ -63,17 +72,20 @@ def fp(candles, side, cfg=CFG, main_candles=None, scan=None, **kw):
 
 
 def long_path(mid_is_eh: bool = True, second_higher: bool = True,
-              lo2=None):
-    """H0 → L1 → H1 → L2 → rally. H1 touches when it sits back on H0; L2 is
-    the confirming low (override it with `lo2` to place it inside/outside
-    the equality band)."""
+              lo2=None, end=108.6, tail_n=6):
+    """H0 → L1 → H1 → L2 → settle INSIDE the close zone (user rule
+    2026-09-28: price must sit within 1.5×ATR of the boundary, never
+    past it — the old rally-to-120 tail is a breakout, not a
+    potential). H1 touches when it sits back on H0; `lo2` places the
+    higher low inside/outside the equality band; `end` parks the close
+    in/out of the zone."""
     hi0 = 110.1
     hi1 = 110.0 if mid_is_eh else 115.0      # no touch when False
     if lo2 is None:
         lo2 = 105.0 if second_higher else 95.0   # below the box when False
     return (_line(100, hi0, 12) + _line(hi0, 100, 12) +
             _line(100, hi1, 12) + _line(hi1, lo2, 8) +
-            _line(lo2, 120, 12))
+            _line(lo2, end, tail_n))
 
 
 def long_main():
@@ -85,12 +97,13 @@ def long_main():
             _line(100, hi1, 12) + _line(hi1, 106, 4))   # ends mid-pullback
 
 
-def short_path(second_lower: bool = True):
-    """L0 → H1 → L1(EL) → H2 → decline."""
+def short_path(second_lower: bool = True, end=101.0, tail_n=8):
+    """L0 → H1 → L1(EL) → H2 → settle INSIDE the close zone above the
+    box low (mirror of long_path, 2026-09-28)."""
     hi2 = 108.0 if second_lower else 118.0   # HH (not LH) when False
     return (_line(110, 100, 12) + _line(100, 110, 12) +
             _line(110, 100.1, 12) + _line(100.1, hi2, 8) +
-            _line(hi2, 95, 12))
+            _line(hi2, end, tail_n))
 
 
 def _inst(symbol="SUIUSDT", tf="1h", type_="box", state=STATE_CONFIRMED,
@@ -168,15 +181,13 @@ def test_short_pattern_detected():
     assert hit["confirm_ts"] >= hit["second_ts"]
 
 
-def test_confirm_ts_is_the_replay_bar():
-    """The alert fires on the candle that closes beyond coef × ATR7."""
-    from compression_detection.potential_break import _confirm_map
-    candles = mk(long_path())
-    cmap = _confirm_map(candles, CFG)
-    hit = fp(candles, "long", CFG)
-    assert cmap[hit["second_ts"]] == hit["confirm_ts"]
-    # ...and that bar is strictly after the pivot bar
-    assert hit["confirm_ts"] > hit["second_ts"]
+def test_confirm_ts_is_the_swing_bar():
+    """New rule (2026-09-28): the trigger fires on the swing itself —
+    confirm_ts IS the swing's pivot ts (the replay-confirm machinery was
+    retired with the trigger rewrite; live swings carry their bar too)."""
+    hit = fp(mk(long_path()), "long", CFG)
+    assert hit is not None
+    assert hit["confirm_ts"] == hit["second_ts"]
 
 
 # ── detection: negative ────────────────────────────────────────────────
@@ -192,15 +203,33 @@ def test_rejects_second_swing_below_the_box_low():
     assert fp(mk(long_path(second_higher=False)), "long", CFG) is None
 
 
-def test_touch_tolerance_is_the_box_atr():
-    """|mid − upper| ≤ box ATR touches, just past it does not."""
-    import compression_detection.potential_break as pb
-    mid_px = 110.0                      # long_path()'s middle high
-    for offset, expect in ((BOX_ATR, True), (BOX_ATR * 1.01, False)):
-        hit = fp(mk(long_path()), "long",
-                 box_at=lambda ts, o=offset: (mid_px + o, BOX_LOWER),
-                 touch_atr=BOX_ATR)
-        assert (hit is not None) is expect, f"offset={offset}"
+def test_touch_and_zone_follow_the_per_tf_band():
+    """2026-09-28: touch AND close zone both use PROX_BAND_ATR (1.5) ×
+    ATR14 of the trigger tf — the box ATR is no longer the yardstick."""
+    from compression_detection.atr import atr_series
+    from compression_detection.potential_break import PROX_BAND_ATR
+    candles = mk(long_path())
+    band = PROX_BAND_ATR * atr_series(candles, 14, "close_only")[-1]
+    # default box top 109.5: touch (110.0) inside the band, close in the
+    # zone -> fires
+    assert fp(candles, "long") is not None
+    # top moved so the touch sits OUTSIDE the band while the close zone
+    # still contains the price -> no touch, no pattern
+    touch_off = 108.8          # |110.0 - 108.8| = 1.2 > band (~1.04)
+    assert fp(candles, "long",
+              box_at=lambda ts: (touch_off, BOX_LOWER)) is None
+
+
+def test_close_outside_the_zone_rejected():
+    """Structure perfect but the close parks short of the 1.5×ATR zone
+    (line - band, line] -> not close to the boundary, no alert."""
+    assert fp(mk(long_path(end=107.0)), "long") is None
+
+
+def test_price_past_the_line_is_the_breakouts_job():
+    """A close BEYOND the boundary belongs to the breakout verdict —
+    the old rally-to-120 tail must never fire a potential (2026-09-28)."""
+    assert fp(mk(long_path(end=118.0, tail_n=8)), "long") is None
 
 
 def test_no_box_lines_fails_closed():
@@ -299,7 +328,8 @@ def test_fmt_potential_long():
     lines = cap.split("\n")
     assert lines[0] == ("🟢 <b>SUIUSDT</b> — 1H Compression  ·  "
                         "Long Potential Break")
-    assert lines[1] == "🎯 15m pattern · touch EH 110 → higher low 105 ✓"
+    assert lines[1] == ("🎯 1H box · break at 15m · "
+                        "touch EH 110 → higher low 105 ✓")
 
 
 def test_fmt_potential_short():
@@ -309,7 +339,8 @@ def test_fmt_potential_short():
     lines = cap.split("\n")
     assert lines[0] == ("🔴 <b>SUIUSDT</b> — 1H Compression  ·  "
                         "Short Potential Break")
-    assert lines[1] == "🎯 1H pattern · touch EL 100.1 → lower high 108 ✓"
+    assert lines[1] == ("🎯 1H box · break at 1H · "
+                        "touch EL 100.1 → lower high 108 ✓")
 
 
 # ── engine: detection pass ─────────────────────────────────────────────
@@ -751,6 +782,59 @@ def test_dead_reply_target_does_not_swallow_the_alert(cfg, monkeypatch):
     assert tg.groups or tg.photos or tg.texts
 
 
+# ── fast proximity pass (60s, user rule 2026-09-28) ────────────────────
+def _afut(value):
+    async def _ret(*a, **k):
+        return value
+    return _ret()
+
+
+def _stub_prox_env(monkeypatch, e, inst, price):
+    e.instances[inst.id] = inst      # the pass iterates self.instances
+    long_c = mk(long_path())
+    e._last_candles = {(inst.symbol, "1h"): long_c,
+                       (inst.symbol, "15m"): long_c}
+    monkeypatch.setattr(eng_mod, "fetch_last_price",
+                        lambda ses, sym: _afut(price))
+    monkeypatch.setattr(eng_mod, "fetch_klines",
+                        lambda ses, sym, tf, lim: _afut(long_c))
+    monkeypatch.setattr(eng_mod, "time",
+                        types.SimpleNamespace(time=lambda: NOW_S))
+
+
+def test_proximity_pass_fires_when_price_in_zone(cfg, monkeypatch):
+    """Price inside a trigger tf's close zone -> the trigger runs BETWEEN
+    scans (the 15-minute scan cadence was parking formed triggers for a
+    full cycle) and fires through the shared register path."""
+    e = _engine(cfg, monkeypatch)
+    inst = _inst()
+    _stub_prox_env(monkeypatch, e, inst, price=108.6)   # in zone
+    sends = asyncio.run(e._proximity_pass(None))
+    assert inst.notified.get("potential_long") is True
+    assert any(ev["kind"] == "potential" for ev in inst.events)
+    assert sends == []               # dry-run engine -> dispatch suppresses
+
+
+def test_proximity_pass_silent_when_out_of_zone(cfg, monkeypatch):
+    e = _engine(cfg, monkeypatch)
+    inst = _inst()
+    _stub_prox_env(monkeypatch, e, inst, price=105.0)   # far from the line
+    sends = asyncio.run(e._proximity_pass(None))
+    assert sends == []
+    assert not inst.notified.get("potential_long")
+    assert inst.events == []
+
+
+def test_proximity_pass_silent_when_price_past_the_line(cfg, monkeypatch):
+    """A close beyond the boundary belongs to the breakout verdict."""
+    e = _engine(cfg, monkeypatch)
+    inst = _inst()
+    _stub_prox_env(monkeypatch, e, inst, price=110.2)   # past 109.5
+    sends = asyncio.run(e._proximity_pass(None))
+    assert sends == []
+    assert not inst.notified.get("potential_long")
+
+
 # ── the same-scan invariant (user rule 2026-09-28, ONEUSDT case) ──────
 def test_potential_pass_runs_after_the_lifecycle_pass(cfg, monkeypatch):
     """A box born in THIS scan must be visible to the potential pass:
@@ -799,22 +883,21 @@ def _live_long_path(tail: str = "clear"):
     """H0 -> L1 -> H1(touch) -> L2 106.5 (never zigzag-confirms) -> tail.
 
     spread=1.0 pins ATR7(true-range) >= 2, so the zigzag confirm needs
-    close > lo2 + 2.4 — the tails always stay under that (live route only).
+    close > lo2 + 2.4 — every tail stays under that (live route only).
+    The LIVE_CLEAR_ATR gate is GONE (2026-09-28 trigger rewrite): what
+    decides is the close zone, so "clear" parks the close inside
+    1.5×ATR of the boundary and the others deliberately outside it.
     """
     hi0, hi1, lo2 = 110.1, 110.0, 106.5
     base = (_line(100, hi0, 12) + _line(hi0, 100, 12) +
             _line(100, hi1, 12) + _line(hi1, lo2, 8))
-    eq = _eq_at(base, len(base) - 1)
     if tail == "clear":
-        # clears LIVE_CLEAR_ATR(1.75) x eq with margin, stays < lo2+2.0
-        target = min(lo2 + 1.75 * eq + 0.1, lo2 + 2.0)
-        path = base + _line(lo2, target, 6)
+        path = base + _line(lo2, 108.85, 6)      # in zone, low unconfirmed
     elif tail == "dip":
-        # past 1x eq but short of 1.75x — held by the clear gate alone
-        path = base + _line(lo2, lo2 + 1.4 * eq, 6)
+        path = base + _line(lo2, lo2 + 0.9, 6)   # clear of 1x, short of zone
     elif tail == "flat":
         path = base + _line(lo2, lo2 + 0.05, 6)
-    else:                                    # below the box band
+    else:                                        # below the box band
         path = base + _line(99.0, 100.6, 6)
     return mk(path, spread=1.0)
 
@@ -830,38 +913,40 @@ def test_live_third_swing_fires_before_the_zigzag_confirm():
     assert hit["live"] is True
     assert hit["second_price"] == 106.5
     assert hit["touch_price"] == 110.0
-    # confirm_ts = the close that cleared lo2 + eq (inside the tail)
-    assert hit["confirm_ts"] in {c.ts for c in candles[-6:]}
+    # the alert carries the swing bar itself (no replay-confirm)
+    assert hit["confirm_ts"] == hit["second_ts"]
 
 
-def test_live_third_swing_never_cleared_by_close_returns_none():
+def test_live_swing_below_the_zone_is_rejected():
+    """The retired clear gate was replaced by the close zone: a live
+    swing whose close parks short of 1.5×ATR from the line never fires."""
     assert fp(_live_long_path(tail="flat"), "long") is None
+    assert fp(_live_long_path(tail="dip"), "long") is None
 
 
 def test_live_third_below_the_box_band_rejected():
     assert fp(_live_long_path(tail="below"), "long") is None
 
 
-def test_live_third_short_mirror_fires():
-    from compression_detection.potential_break import _zigzag
-    lo0, hi1, lo1, hi2 = 99.8, 105.0, 100.0, 104.0
-    base = (_line(110, lo0, 12) + _line(lo0, hi1, 12) +
-            _line(hi1, lo1, 12) + _line(lo1, hi2, 8))
-    eq = _eq_at(base, len(base) - 1)
-    # clears 1.75*eq + margin below hi2, stays above hi2 - 2.4 (no zigzag)
-    path = base + _line(hi2, hi2 - min(1.75 * eq + 0.1, 2.0), 6)
-    candles = mk(path, spread=1.0)
-    assert all(abs(p.price - hi2) > 1e-9 for p in _zigzag(candles, CFG))
-    hit = fp(candles, "short")
+def test_short_mirror_fires():
+    """SHORT mirror of the trigger (2026-09-28): EL at the floor, LH
+    after it, close settling in the zone above the boundary. Here the
+    decline CONFIRMS the swing — confirmed or live are both fine per
+    the spec ("if it's confirmed, it's OK too"); the live route itself
+    is covered by the long test above."""
+    path = (_line(110, 100, 6) + _line(100, 110, 6) +
+            _line(110, 100.3, 6) + _line(100.3, 103, 4) +
+            _line(103, 101.2, 3))
+    hit = fp(mk(path), "short")
     assert hit is not None
-    assert hit["live"] is True
-    assert hit["second_price"] == hi2
-    assert hit["touch_price"] == 100.0
+    assert hit["second_price"] == 103.0
+    assert hit["second_label"] == "LH"
+    assert hit["touch_price"] == 100.3
 
 
-def test_live_third_requires_the_touch_to_be_the_last_main_pivot():
-    """A confirmed pivot AFTER the touch supersedes it: the live route must
-    refuse even though the live low itself would clear the band."""
+def test_touch_must_be_the_last_high_on_the_line():
+    """The trigger's touch is the LAST high of its tf — a newer, off-line
+    high (107 here) supersedes any earlier EH, so nothing qualifies."""
     hi0, hi1 = 110.1, 110.0
     path = (_line(100, hi0, 12) + _line(hi0, 100, 12) +
             _line(100, hi1, 12) + _line(hi1, 104, 10) +   # low 104 confirms
@@ -872,56 +957,43 @@ def test_live_third_requires_the_touch_to_be_the_last_main_pivot():
     assert fp(candles, "long") is None
 
 
-def test_live_dip_past_1x_but_short_of_the_clear_gate_is_held(monkeypatch):
-    """The clear gate (LIVE_CLEAR_ATR = 1.75, user choice 2026-09-27,
-    EIGEN/XLM case) is the ONLY reason this 1.4x dip doesn't alert: at
-    1x the same path fires."""
-    from compression_detection import potential_break as pb
-    candles = _live_long_path(tail="dip")
-    assert fp(candles, "long") is None
-    monkeypatch.setattr(pb, "LIVE_CLEAR_ATR", 1.0)
-    assert fp(candles, "long") is not None
-
-
 # ── one alert PER TOUCH + lower-tf touches (user rules 2026-09-27 eve) ──
 
-def _rearm_path():
-    """Three touch/third rounds on a flat top:
-    touch@110 -> HL 105 -> touch@110.4 -> HL 105.5 -> touch@110.5 -> HL 106.2.
-    Each touch sits within BOX_ATR of the line (109.5) and each third
-    clears box_low + eq."""
+def _rearm_round1():
+    """Round 1 complete: EH 110.0 -> HL 105 -> settle in-zone (108.9)."""
     return (_line(100, 110.1, 12) + _line(110.1, 100, 12) +
-            _line(100, 110, 12) + _line(110, 105, 8) +
-            _line(105, 110.4, 10) + _line(110.4, 106.2, 6) +
-            _line(106.2, 110.5, 8) + _line(110.5, 109, 2) +
-            _line(109, 107.3, 6) + _line(107.3, 110, 6))
+            _line(100, 110.0, 12) + _line(110.0, 105, 8) +
+            _line(105, 108.9, 6))
+
+
+def _rearm_round2():
+    """Round 1, then a NEWER touch (110.1) -> HL 106.2 -> in-zone."""
+    return (_rearm_round1() + _line(108.9, 110.1, 8) +
+            _line(110.1, 106.2, 6) + _line(106.2, 108.9, 6))
 
 
 def test_one_potential_per_touch_rearm():
-    """A fired touch is SPENT (since_touch_ts); a strictly newer touch with
-    its own third re-arms — no HL-beats-HL rule, just touch -> one swing."""
-    path = _rearm_path()
-    full = mk(path)
+    """A fired touch is SPENT (since_touch_ts); a strictly newer touch
+    with its own swing re-arms — touch -> one swing, no exceptions."""
+    full = mk(_rearm_round2())
     r_full = fp(full, "long")
     assert r_full is not None
-    # the freshest complete touch (H4) armed this hit
-    assert fp(full, "long", since_touch_ts=r_full["touch_ts"]) is None
-
-    # slice before the third touch exists: the middle touch arms instead
-    r_mid = fp(mk(path[:63]), "long")
+    # round1 alone fires with its own touch
+    r_mid = fp(mk(_rearm_round1()), "long")
     assert r_mid is not None
     assert r_mid["touch_ts"] < r_full["touch_ts"]
-
-    # that middle touch is spent -> the next touch re-arms on full candles
+    # round1's touch spent -> round2's newer touch re-arms on full candles
     r_again = fp(full, "long", since_touch_ts=r_mid["touch_ts"])
     assert r_again is not None
     assert r_again["touch_ts"] == r_full["touch_ts"]
+    # ...and once THAT touch is spent, nothing remains
+    assert fp(full, "long", since_touch_ts=r_full["touch_ts"]) is None
 
 
-def test_lower_tf_touch_with_main_tf_third():
-    """The touch may live on the timeframe BELOW the box (user rule
-    2026-09-27 evening); the third then sits on the main tf as its last
-    pivot, with nothing on the touch's tf in between."""
+def test_trigger_is_per_tf_no_cross_tf_pairing():
+    """2026-09-28 rewrite: touch AND swing must come from the SAME tf.
+    A touch on the lower tf with the swing on the main tf no longer
+    combines — each tf is judged whole, or not at all."""
     main = mk(_line(100, 110.1, 12) + _line(110.1, 100, 12) +
               _line(100, 107, 12) + _line(107, 105, 4) +
               _line(105, 118, 10))              # L 105 = last main pivot
@@ -929,11 +1001,17 @@ def test_lower_tf_touch_with_main_tf_third():
              _line(100, 110, 12) + _line(110, 99, 4))   # EH 110 touch only
     hit = fp(main, "long", main_candles=main,
              scan=[("15m", low), ("1h", main)])
-    assert hit is not None, "lower-tf touch must be accepted"
-    assert hit["touch_tf"] == "15m"
-    assert hit["pattern_tf"] == "1h"
-    assert hit["touch_price"] == 110.0
-    assert hit["second_price"] == 105.0
+    assert hit is None, "cross-tf pairs must never combine"
+
+    # a COMPLETE trigger on the box's own tf still fires with the lower
+    # tf present but empty of patterns
+    full = mk(_line(100, 110.1, 12) + _line(110.1, 100, 12) +
+              _line(100, 110, 12) + _line(110, 105, 8) +
+              _line(105, 108.9, 6))
+    hit2 = fp(full, "long", main_candles=full,
+              scan=[("15m", low), ("1h", full)])
+    assert hit2 is not None
+    assert hit2["pattern_tf"] == "1h"
 
 
 # ── LIVE main-tf touch (user choice 2026-09-28, option A / SAND) ─────────
@@ -957,26 +1035,16 @@ def _live_touch_third_confirmed():
             _line(105, 118, 12))
 
 
-def test_live_main_touch_fires_before_the_touch_confirms():
-    """SAND: pattern done 04:00, touch confirmed 07:30, box 08:31, alert
-    08:44. The provisional main-tf EH on the line IS the touch — the
-    confirmed swing then fires against it."""
+def test_unconfirmed_touch_does_not_fire():
+    """2026-09-28 rewrite: the touch must be a CONFIRMED EH/EL (the
+    no-confirm clause belongs to the HIGHER LOW only). The SAND-era
+    live-touch route is retired — lower tfs exist precisely so the touch
+    confirms fast somewhere."""
     main = mk(_live_touch_main())
     low = mk(_live_touch_third_confirmed())
     hit = fp(main, "long", main_candles=main,
              scan=[("15m", low), ("1h", main)])
-    assert hit is not None, "live main touch must be accepted"
-    assert hit["touch_tf"] == "1h"
-    assert hit["touch_ts"] == T0 + 29 * STEP     # the provisional bar
-    assert hit["touch_price"] == 110.2
-    assert hit["pattern_tf"] == "15m"
-    assert hit["second_price"] == 105.0
-    assert hit["second_label"] == "HL"
-    # no confirmed pivot sits at the touch — the live path did the work
-    assert all(p.ts != hit["touch_ts"]
-               for p, _ in [(p, None) for p in
-                            __import__("compression_detection.potential_break",
-                                      fromlist=["_zigzag"])._zigzag(main, CFG)])
+    assert hit is None, "a provisional (unconfirmed) touch never fires"
 
 
 def test_live_main_touch_rejected_when_the_label_is_not_eh():
@@ -1001,29 +1069,6 @@ def test_live_main_touch_rejected_when_off_the_line():
     assert hit is None
 
 
-def test_live_touch_with_live_third_swing_fires():
-    """The full SAND shape: live touch + LIVE third (the pullback low is
-    still unconfirmed; a close clears it by LIVE_CLEAR_ATR while staying
-    under the zigzag confirm — recent vol must be hot for that window to
-    exist, which is exactly the SAND tape)."""
-    main = mk(_live_touch_main())
-    # 15m: rise to a HH off-line top, 7-bar fast dip to 101.2, then the
-    # clearing candle close 102.6: > 101.2 + 1.75*ATR14 (1.328) but
-    # under the zigzag confirm (spread 0.1 pushes the zigzag's true-range
-    # ATR7 above 1.46 x close-only ATR14, which is the window).
-    low = mk(_line(100, 110.1, 48) + _line(110.1, 100, 48) +
-             _line(100, 111, 33) + _line(111, 101.2, 7) +
-             _line(101.2, 102.6, 1), spread=0.1)
-    hit = fp(main, "long", main_candles=main,
-             scan=[("15m", low), ("1h", main)])
-    assert hit is not None, "live touch + live third must fire"
-    assert hit.get("live") is True
-    assert hit["touch_tf"] == "1h"
-    assert hit["touch_price"] == 110.2
-    assert hit["pattern_tf"] == "15m"
-    assert hit["second_price"] == 101.2
-
-
 def test_lower_tf_touch_blocked_by_intervening_low_tf_pivot():
     """Adjacency: a pivot on the touch's own tf between touch and third
     means the structure already moved — no alert."""
@@ -1043,9 +1088,8 @@ def test_rearm_fires_again_on_a_new_touch(cfg, monkeypatch):
     fires twice; a newer touch arms fire #2; then silence."""
     e = _engine(cfg, monkeypatch)
     inst = _inst()
-    path = _rearm_path()
-    k1 = mk(path[:63])
-    k2 = mk(path)
+    k1 = mk(_rearm_round1())
+    k2 = mk(_rearm_round2())
 
     a1 = e._potential_actions({inst.id: inst},
                               {(inst.symbol, "1h"): k1,
@@ -1077,12 +1121,12 @@ def test_confirmed_long_third_equal_low_is_rejected():
     that's a retest, not a higher low. Control fires with a real HL."""
     eq_retest = (_line(100, 110, 12) + _line(110, 105, 8) +
                  _line(105, 110.2, 8) + _line(110.2, 105.3, 6) +
-                 _line(105.3, 120, 14))         # 105.3 vs 105 = EL
+                 _line(105.3, 108.9, 6))        # 105.3 vs 105 = EL (in zone)
     assert fp(mk(eq_retest), "long") is None
 
     real_hl = (_line(100, 110, 12) + _line(110, 105, 8) +
                _line(105, 110.2, 8) + _line(110.2, 106.8, 6) +
-               _line(106.8, 120, 14))           # 106.8 vs 105 = HL
+               _line(106.8, 108.9, 6))          # 106.8 vs 105 = HL (in zone)
     hit = fp(mk(real_hl), "long")
     assert hit is not None
     assert hit["second_label"] == "HL"
@@ -1093,12 +1137,12 @@ def test_confirmed_short_third_equal_high_is_rejected():
     price retested the top, not a lower high. Control fires with a real LH."""
     eq_retest = (_line(110, 100, 12) + _line(100, 105, 10) +
                  _line(105, 100.2, 8) + _line(100.2, 105.0, 8) +
-                 _line(105.0, 96, 10))          # 105.0 vs H1 105 = EH
+                 _line(105.0, 100.6, 6))        # 105.0 vs H1 105 = EH (in zone)
     assert fp(mk(eq_retest), "short") is None
 
     real_lh = (_line(110, 100, 12) + _line(100, 105, 10) +
                _line(105, 100.2, 8) + _line(100.2, 103.0, 8) +
-               _line(103.0, 96, 10))            # 103 vs 105 = LH
+               _line(103.0, 100.6, 6))          # 103 vs 105 = LH (in zone)
     hit = fp(mk(real_lh), "short")
     assert hit is not None
     assert hit["second_label"] == "LH"

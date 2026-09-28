@@ -76,15 +76,14 @@ def fmt_breakout(inst, side: str, level: float) -> str:
 
 
 def fmt_potential(inst, side: str, pattern_tf: str, hit: dict) -> str:
-    """Potential-break confirmation (user rule 2026-09-27).
+    """Potential-break confirmation (user rule 2026-09-28, trigger rewrite).
 
-    Two steps: the TOUCH (a confirmed EH/EL on the box side, main tf) and
-    the CONFIRMING swing — a higher low / lower high that clears the
-    equality band against the other box side, on the main tf or the tf
-    below. The swing is only a pivot once a close beyond coef × ATR7
-    confirms it, which is what this alert fires on. `hit` comes from
-    potential_break.find_potential; `mid_price` is the touch — the line the
-    low-TF chart adjusts to.
+    Line 2 states BOTH frames: the tf the box lives on and the tf the
+    trigger fired on ("4H box · break at 1H"). The trigger itself: an
+    EH/EL at the boundary followed by a higher low / lower high (live or
+    confirmed) inside the per-tf 1.5×ATR close zone. `hit` comes from
+    potential_break.find_potential; `mid_price` is the touch — the line
+    the lower-tf chart adjusts to.
     """
     arrow = "🟢" if side == "long" else "🔴"
     word = "Long" if side == "long" else "Short"
@@ -97,7 +96,8 @@ def fmt_potential(inst, side: str, pattern_tf: str, hit: dict) -> str:
     return (
         f"{arrow} <b>{inst.symbol}</b> — {tf_label(inst.tf)} Compression  ·  "
         f"{word} Potential Break\n"
-        f"🎯 {tf_label(pattern_tf)} pattern · {step}"
+        f"🎯 {tf_label(inst.tf)} box · break at {tf_label(pattern_tf)}"
+        f" · {step}"
     )
 
 

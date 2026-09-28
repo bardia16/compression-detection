@@ -263,12 +263,6 @@ class Engine:
                             "candidates": [c.to_dict() for c in r["candidates"][:8]],
                         })
 
-            # pass B — potential break (boxes still alive): low → EH →
-            # confirmed higher low / high → EL → confirmed lower high on the
-            # box's own TF and one TF down.
-            raw_actions.extend(self._potential_actions(instances_src,
-                                                       candles_by_key, now_s))
-
             # pass C — lifecycle: close verdicts, continuation/invalidation,
             # new instances (this is where a triangle replaces the box).
             for pair, res in zip(pairs, results):
@@ -281,6 +275,16 @@ class Engine:
                         instances_src, sym, tf, r["candidates"], r["candles"],
                         TF_MS[tf], now_s, self.cfg,
                     ))
+
+            # pass B — potential break, AFTER creation (user rule
+            # 2026-09-28): a box born in THIS scan is checked right away.
+            # The old order (B before C) forced every new box to wait a
+            # full scan cycle (15 min) before its first potential check
+            # (ONEUSDT case: box 10:01:30, potential 10:16:50).
+            # Low → EH → confirmed higher low / high → EL → confirmed
+            # lower high on the box's own TF and one TF down.
+            raw_actions.extend(self._potential_actions(instances_src,
+                                                       candles_by_key, now_s))
 
             # a box that reached BREAKOUT in this very scan already resolved —
             # announcing its 'potential' break one action later is noise

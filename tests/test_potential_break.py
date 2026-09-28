@@ -737,11 +737,12 @@ def test_dead_reply_target_does_not_swallow_the_alert(cfg, monkeypatch):
     assert tg.groups or tg.photos or tg.texts
 
 
-# ── the handover invariant (what makes the box -> triangle case work) ──
-def test_potential_pass_runs_before_the_lifecycle_pass(cfg, monkeypatch):
-    """The box must still be ALIVE when the pattern is checked, i.e. before
-    update_for_scan can invalidate it in the box -> ascending/descending
-    triangle handover. Otherwise the replacement case can never alert."""
+# ── the same-scan invariant (user rule 2026-09-28, ONEUSDT case) ──────
+def test_potential_pass_runs_after_the_lifecycle_pass(cfg, monkeypatch):
+    """A box born in THIS scan must be visible to the potential pass:
+    lifecycle (creation) first, potential check after — the old order
+    (B before C) forced every new box to wait a full scan cycle (15 min)
+    before its first check (ONEUSDT: box 10:01:30, potential 10:16:50)."""
     from test_engine import patch_env, scan, box_closes
 
     order = []
@@ -761,8 +762,10 @@ def test_potential_pass_runs_before_the_lifecycle_pass(cfg, monkeypatch):
     monkeypatch.setattr(eng_mod, "update_for_scan", spy_upd)
     patch_env(monkeypatch, box_closes())
     scan(cfg)
-    assert order[0] == "potential", order[:4]
     assert "lifecycle" in order
+    assert order[-1] == "potential", order[-4:]
+    # potential sees the post-lifecycle instance dict (born boxes included)
+    assert order.index("lifecycle") < len(order) - 1
 
 
 # ── LIVE third swing (loosened 2026-09-27, PENDLE case) ───────────────

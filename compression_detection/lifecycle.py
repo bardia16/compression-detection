@@ -661,6 +661,23 @@ def update_for_scan(
                for i in instances.values()
                if i.symbol == symbol and i.tf == tf):
             continue
+        # No pattern CONVERSION (user rule 2026-09-28): while ANY
+        # instance of this (symbol,tf) is still active, a candidate of a
+        # DIFFERENT type never spawns — box -> triangle (or the reverse)
+        # only becomes possible once the current pattern is terminal
+        # (broken / invalidated), never as a live handover.
+        if any(i.type != cand.type and i.state in ACTIVE_STATES
+               for i in instances.values()
+               if i.symbol == symbol and i.tf == tf):
+            if cand.type not in skipped_types:
+                skipped_types.add(cand.type)
+                actions.append(Action("skip_create", None, {
+                    "symbol": symbol, "tf": tf, "type": cand.type,
+                    "reason": "other_type_active",
+                    "first_ts": cand.first_ts,
+                    "pivot_count": cand.pivot_count,
+                }))
+            continue
         # anti-respawn: no new instance on the same anchor as a terminal one
         key = instance_id(symbol, tf, cand.type, cand.first_ts)
         if key in instances:

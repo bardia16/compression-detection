@@ -12,8 +12,8 @@ from compression_detection.detector import (
 )
 from compression_detection.lifecycle import (
     STATE_BREAKOUT, STATE_COMPRESSING, STATE_CONFIRMED, STATE_DETECTED,
-    STATE_INVALIDATED, Instance, best_per_coin_tf, create_instance,
-    evaluate_closed_candles, find_continuation, level_for,
+    STATE_INVALIDATED, TERMINAL_STATES, Instance, best_per_coin_tf,
+    create_instance, evaluate_closed_candles, find_continuation, level_for,
     retire_out_of_universe, state_for_level, update_for_scan,
 )
 from compression_detection.models import Candle
@@ -65,6 +65,39 @@ def box_refs(n=4, end=30):
     ]
     refs = base[:n]
     return refs, mk_cand(TYPE_BOX, refs)
+
+
+def test_no_conversion_while_box_is_active():
+    """User rule 2026-09-28: patterns never convert into each other
+    (box -> triangle / triangle -> box) unless the current one is
+    broken — while ANY instance of the (symbol,tf) is active, a
+    candidate of a different type must not spawn."""
+    refs_b, box = box_refs()
+    instances = {}
+    update_for_scan(instances, "AAA", "15m", [box], [], TF_MS, 1000, CFG)
+    assert any(i.type == TYPE_BOX and i.state not in TERMINAL_STATES
+               for i in instances.values())
+
+    # same scan: box CONTINUES + an asc-triangle candidate shows up
+    _, box2 = box_refs(end=40)
+    trefs = [ref(44, 100.0, "H"), ref(48, 90.0, "L", None),
+             ref(52, 100.4, "H", "EH"), ref(56, 95.0, "L", "HL")]
+    tri = mk_cand(TYPE_ASC_TRI, trefs)
+    acts = update_for_scan(instances, "AAA", "15m", [box2, tri], [],
+                           TF_MS, 1060, CFG)
+    assert any(i.type == TYPE_ASC_TRI for i in instances.values()) is False
+    skip = [a for a in acts if a.kind == "skip_create"]
+    assert any(a.detail.get("reason") == "other_type_active"
+               for a in skip), "triangle must be skipped while box is active"
+
+    # once the box BREAKS (terminal), the triangle may spawn
+    for i in instances.values():
+        if i.type == TYPE_BOX:
+            i.state = STATE_BREAKOUT
+    acts2 = update_for_scan(instances, "AAA", "15m", [tri], [],
+                            TF_MS, 1120, CFG)
+    assert any(i.type == TYPE_ASC_TRI for i in instances.values()), \
+        "after the box is terminal the triangle is allowed"
 
 
 def candle(bar, close, tf_ms=TF_MS):

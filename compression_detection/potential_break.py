@@ -6,7 +6,7 @@ A pattern needs a BOX first. From there the alert is a per-tf TRIGGER:
                   tf (engine scan list: 1h -> [15m, 1h], 4h -> [1h, 15m,
                   4h], 1d -> [4h, 1h, 15m, 1d]).
 
-  close zone    = price within PROX_BAND_ATR (1.5) x ATR14 of the boundary,
+  close zone    = price within PROX_BAND_ATR (1.0) x ATR14 of the boundary,
                   evaluated PER TF with that tf's own ATR ("their 1.5 atr
                   range") — and never past the line (a close beyond it
                   belongs to the breakout verdict).
@@ -28,7 +28,8 @@ EH/EL armed via since_touch_ts), anchor_ts, POTENTIAL_FRESH_S freshness
 on the swing.
 
 `touch_atr` stays in the signature for compatibility; the band is the
-per-tf PROX_BAND_ATR x ATR14 now. `live_price` lets the fast proximity
+per-tf PROX_BAND_ATR (1.0 since 2026-09-29) x ATR14 now. `live_price`
+lets the fast proximity
 pass (60s poll) override the last closed close.
 """
 from __future__ import annotations
@@ -52,10 +53,10 @@ LOWER_TF: Dict[str, List[str]] = {
     "1d": ["4h", "1h", "15m"],
 }
 
-# Close-zone / boundary-touch band per trigger tf (user rule
-# 2026-09-28): price AND the EH/EL touch sit within 1.5 x ATR14 of
-# that tf's boundary line.
-PROX_BAND_ATR = 1.5
+# Close-zone / boundary-touch band per trigger tf (user rule 2026-09-28;
+# tightened 1.5 -> 1.0 on 2026-09-29, JUP case): price AND the EH/EL
+# touch sit within 1.0 x ATR14 of that tf's boundary line.
+PROX_BAND_ATR = 1.0
 
 # Freshness window (user choice 2026-09-27): a swing older than this
 # is old news — the pass would otherwise backfill patterns that completed
@@ -92,7 +93,7 @@ def find_potential(side: str,
     Checks every trigger tf (lower tfs nearest-first + the box's own tf)
     independently and returns the FRESHEST passing hit, or None.
     touch_atr is accepted but unused — the band is per-tf
-    PROX_BAND_ATR x ATR14 now.
+    PROX_BAND_ATR (1.0) x ATR14 now.
     """
     if side not in ("long", "short"):
         raise ValueError(f"side must be long|short, got {side!r}")

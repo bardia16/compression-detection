@@ -2,7 +2,7 @@
 
   LONG : [box exists] + on a trigger tf: EH at the boundary, then a
          higher low (live OR confirmed), price inside that tf's
-         1.5×ATR14 close zone, never past the line
+         1.0×ATR14 close zone, never past the line
   SHORT: mirror — EL at the boundary, then a lower high, zone above
 
 Trigger tfs = the box's lower tfs (nearest first) + the box's own tf;
@@ -72,10 +72,10 @@ def fp(candles, side, cfg=CFG, main_candles=None, scan=None, **kw):
 
 
 def long_path(mid_is_eh: bool = True, second_higher: bool = True,
-              lo2=None, end=108.6, tail_n=6):
+              lo2=None, end=109.0, tail_n=6):
     """H0 → L1 → H1 → L2 → settle INSIDE the close zone (user rule
-    2026-09-28: price must sit within 1.5×ATR of the boundary, never
-    past it — the old rally-to-120 tail is a breakout, not a
+    price must sit within 1.0×ATR of the boundary (tightened
+    2026-09-29), never past it — a rally-through is a breakout, not a
     potential). H1 touches when it sits back on H0; `lo2` places the
     higher low inside/outside the equality band; `end` parks the close
     in/out of the zone."""
@@ -97,9 +97,9 @@ def long_main():
             _line(100, hi1, 12) + _line(hi1, 106, 4))   # ends mid-pullback
 
 
-def short_path(second_lower: bool = True, end=101.0, tail_n=8):
-    """L0 → H1 → L1(EL) → H2 → settle INSIDE the close zone above the
-    box low (mirror of long_path, 2026-09-28)."""
+def short_path(second_lower: bool = True, end=100.5, tail_n=8):
+    """L0 → H1 → L1(EL) → H2 → settle INSIDE the 1.0×ATR close zone
+    above the box low (mirror of long_path)."""
     hi2 = 108.0 if second_lower else 118.0   # HH (not LH) when False
     return (_line(110, 100, 12) + _line(100, 110, 12) +
             _line(110, 100.1, 12) + _line(100.1, hi2, 8) +
@@ -204,7 +204,8 @@ def test_rejects_second_swing_below_the_box_low():
 
 
 def test_touch_and_zone_follow_the_per_tf_band():
-    """2026-09-28: touch AND close zone both use PROX_BAND_ATR (1.5) ×
+    """Touch AND close zone both use PROX_BAND_ATR (1.0 since
+    2026-09-29) ×
     ATR14 of the trigger tf — the box ATR is no longer the yardstick."""
     from compression_detection.atr import atr_series
     from compression_detection.potential_break import PROX_BAND_ATR
@@ -808,7 +809,7 @@ def test_proximity_pass_fires_when_price_in_zone(cfg, monkeypatch):
     full cycle) and fires through the shared register path."""
     e = _engine(cfg, monkeypatch)
     inst = _inst()
-    _stub_prox_env(monkeypatch, e, inst, price=108.6)   # in zone
+    _stub_prox_env(monkeypatch, e, inst, price=109.0)   # in zone
     sends = asyncio.run(e._proximity_pass(None))
     assert inst.notified.get("potential_long") is True
     assert any(ev["kind"] == "potential" for ev in inst.events)
@@ -888,11 +889,11 @@ def _live_long_path(tail: str = "clear"):
     decides is the close zone, so "clear" parks the close inside
     1.5×ATR of the boundary and the others deliberately outside it.
     """
-    hi0, hi1, lo2 = 110.1, 110.0, 106.5
+    hi0, hi1, lo2 = 110.1, 110.0, 106.7
     base = (_line(100, hi0, 12) + _line(hi0, 100, 12) +
             _line(100, hi1, 12) + _line(hi1, lo2, 8))
     if tail == "clear":
-        path = base + _line(lo2, 108.85, 6)      # in zone, low unconfirmed
+        path = base + _line(lo2, 109.0, 6)        # in zone, low unconfirmed
     elif tail == "dip":
         path = base + _line(lo2, lo2 + 0.9, 6)   # clear of 1x, short of zone
     elif tail == "flat":
@@ -907,11 +908,11 @@ def test_live_third_swing_fires_before_the_zigzag_confirm():
     candles = _live_long_path()
     # the third low is NOT in the confirmed zigzag — only the live route
     # can produce this hit
-    assert all(abs(p.price - 106.5) > 1e-9 for p in _zigzag(candles, CFG))
+    assert all(abs(p.price - 106.7) > 1e-9 for p in _zigzag(candles, CFG))
     hit = fp(candles, "long")
     assert hit is not None
     assert hit["live"] is True
-    assert hit["second_price"] == 106.5
+    assert hit["second_price"] == 106.7
     assert hit["touch_price"] == 110.0
     # the alert carries the swing bar itself (no replay-confirm)
     assert hit["confirm_ts"] == hit["second_ts"]
@@ -960,16 +961,17 @@ def test_touch_must_be_the_last_high_on_the_line():
 # ── one alert PER TOUCH + lower-tf touches (user rules 2026-09-27 eve) ──
 
 def _rearm_round1():
-    """Round 1 complete: EH 110.0 -> HL 105 -> settle in-zone (108.9)."""
+    """Round 1 complete: EH 110.0 -> HL 105 -> settle in-zone (109.1)."""
     return (_line(100, 110.1, 12) + _line(110.1, 100, 12) +
             _line(100, 110.0, 12) + _line(110.0, 105, 8) +
-            _line(105, 108.9, 6))
+            _line(105, 109.1, 6))
 
 
 def _rearm_round2():
-    """Round 1, then a NEWER touch (110.1) -> HL 106.2 -> in-zone."""
-    return (_rearm_round1() + _line(108.9, 110.1, 8) +
-            _line(110.1, 106.2, 6) + _line(106.2, 108.9, 6))
+    """Round 1, then a NEWER touch (109.7, inside the 1.0 band) ->
+    HL 106.2 -> in-zone."""
+    return (_rearm_round1() + _line(109.1, 109.7, 8) +
+            _line(109.7, 106.2, 6) + _line(106.2, 109.1, 6))
 
 
 def test_one_potential_per_touch_rearm():
@@ -1120,13 +1122,13 @@ def test_confirmed_long_third_equal_low_is_rejected():
     """Third clears box_low+eq but is EQUAL to the previous low (EL) —
     that's a retest, not a higher low. Control fires with a real HL."""
     eq_retest = (_line(100, 110, 12) + _line(110, 105, 8) +
-                 _line(105, 110.2, 8) + _line(110.2, 105.3, 6) +
-                 _line(105.3, 108.9, 6))        # 105.3 vs 105 = EL (in zone)
+                 _line(105, 109.9, 8) + _line(109.9, 105.3, 6) +
+                 _line(105.3, 109.1, 6))        # 105.3 vs 105 = EL (in zone)
     assert fp(mk(eq_retest), "long") is None
 
     real_hl = (_line(100, 110, 12) + _line(110, 105, 8) +
-               _line(105, 110.2, 8) + _line(110.2, 106.8, 6) +
-               _line(106.8, 108.9, 6))          # 106.8 vs 105 = HL (in zone)
+               _line(105, 109.9, 8) + _line(109.9, 106.8, 6) +
+               _line(106.8, 109.1, 6))          # 106.8 vs 105 = HL (in zone)
     hit = fp(mk(real_hl), "long")
     assert hit is not None
     assert hit["second_label"] == "HL"
@@ -1137,12 +1139,12 @@ def test_confirmed_short_third_equal_high_is_rejected():
     price retested the top, not a lower high. Control fires with a real LH."""
     eq_retest = (_line(110, 100, 12) + _line(100, 105, 10) +
                  _line(105, 100.2, 8) + _line(100.2, 105.0, 8) +
-                 _line(105.0, 100.6, 6))        # 105.0 vs H1 105 = EH (in zone)
+                 _line(105.0, 100.3, 6))        # 105.0 vs H1 105 = EH (in zone)
     assert fp(mk(eq_retest), "short") is None
 
     real_lh = (_line(110, 100, 12) + _line(100, 105, 10) +
                _line(105, 100.2, 8) + _line(100.2, 103.0, 8) +
-               _line(103.0, 100.6, 6))          # 103 vs 105 = LH (in zone)
+               _line(103.0, 100.3, 6))          # 103 vs 105 = LH (in zone)
     hit = fp(mk(real_lh), "short")
     assert hit is not None
     assert hit["second_label"] == "LH"

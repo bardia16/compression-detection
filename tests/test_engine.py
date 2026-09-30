@@ -134,7 +134,7 @@ def test_breakout_close_fires_end_to_end(cfg, monkeypatch):
     assert tg.replies[0] is None                    # compression = root message
 
     # scan 2: breakout candle closes above the upper boundary (~103)
-    closes2 = box_closes() + [104.5]
+    closes2 = box_closes() + [104.5, 104.6, 104.7, 104.8]  # breaker + 3 holds
     patch_env(monkeypatch, closes2)
     e2, res2 = scan(cfg, tg=tg)
     assert any("Breakout" in p and "above" in p for p in tg.posts)
@@ -164,7 +164,8 @@ def test_breakout_without_compression_message_sends_standalone(cfg, monkeypatch)
         inst["notified"]["compression"] = False
     cfg.state_path.write_text(json.dumps(s))
 
-    patch_env(monkeypatch, box_closes() + [104.5])
+    patch_env(monkeypatch,
+                             box_closes() + [104.5, 104.6, 104.7, 104.8])
     e2, res2 = scan(cfg, tg=tg)
     assert any("Breakout" in p for p in tg.posts)
     assert tg.replies[-1] is None                   # standalone send
@@ -281,7 +282,7 @@ def test_probe_confirmed_close_keeps_message(cfg, monkeypatch):
     mid = inst.probe_msg_id
 
     # scan: candle CLOSES beyond -> message kept, breakout recorded
-    closes2 = box_closes() + [104.5]
+    closes2 = box_closes() + [104.5, 104.6, 104.7, 104.8]  # breaker + 3 holds
     patch_env(monkeypatch, closes2)
     e2, res2 = scan(cfg, tg=tg)
     assert mid not in tg.deletes

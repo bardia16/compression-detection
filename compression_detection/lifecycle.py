@@ -88,6 +88,62 @@ def classify_close(inst, close: float, bar: int, buffer: float):
             line_side = "down"
     return up_hit, dn_hit, line_side
 
+# Box break-hold (user rule 2026-09-30, XLM case): a candle closing
+# through a pivot does NOT break the box — the box STAYS a box for the
+# next BOX_BREAK_HOLD_CANDLES candles on that tf; only if none of them
+# closes back through the pivot is the break confirmed. A close back
+# through cancels the hold. Derived from post-pivot closes every scan
+# (no persisted state — restart/catchup safe by construction).
+_BOX_TYPE = "box"
+BOX_BREAK_HOLD_CANDLES = 3
+
+
+def box_break_hold_step(side: str, count: int, close: float,
+                        up_level: Optional[float], lo_level: Optional[float],
+                        buffer: float,
+                        n_candles: int = BOX_BREAK_HOLD_CANDLES):
+    """Advance the hold machine by ONE closed candle.
+    Returns (side, count, events); events = open:<side>/cancel:<side>/
+    confirm:<side> (a cancel may be followed by a fresh open)."""
+    ev: List[str] = []
+    if side == "up":
+        if up_level is not None and close < up_level - buffer:
+            side, count = "", 0
+            ev.append("cancel:up")
+    elif side == "down":
+        if lo_level is not None and close > lo_level + buffer:
+            side, count = "", 0
+            ev.append("cancel:down")
+    if side == "":
+        if up_level is not None and close > up_level + buffer:
+            side, count = "up", 0
+            ev.append("open:up")
+        elif lo_level is not None and close < lo_level - buffer:
+            side, count = "down", 0
+            ev.append("open:down")
+    else:
+        count += 1
+        if count >= n_candles:
+            ev.append(f"confirm:{side}")
+            side, count = "", 0
+    return side, count, ev
+
+
+def box_break_fold(up_level: Optional[float], lo_level: Optional[float],
+                   closes: Sequence[Candle], buffer: float,
+                   n_candles: int = BOX_BREAK_HOLD_CANDLES):
+    """Fold an ordered batch of closes through the machine.
+    Returns (side, count, confirmed_candle): confirmed_candle is the
+    candle on which a hold confirmed (None = never in this batch)."""
+    side, count, confirmed = "", 0, None
+    for c in sorted(closes, key=lambda x: x.ts):
+        side, count, evs = box_break_hold_step(
+            side, count, c.close, up_level, lo_level, buffer, n_candles)
+        if any(e.startswith("confirm:") for e in evs):
+            return "", 0, c
+    return side, count, None
+
+
 _LEVEL_TO_STATE = {
     LEVEL_DETECTED: STATE_DETECTED,
     LEVEL_CONFIRMED: STATE_CONFIRMED,
@@ -463,6 +519,13 @@ def evaluate_closed_candles(
     """
     actions: List[Action] = []
     new = [c for c in candles if c.ts > inst.last_eval_ts]
+
+    if inst.type == _BOX_TYPE:
+        # runs even with an empty batch: a box whose post-pivot history
+        # already confirms the hold must break NOW (backfill), not at
+        # the next close (XLM 1d case — alive 13 closes past its level).
+        return _evaluate_box(inst, new, candles, tf_ms, now_s, cfg)
+
     if not new:
         return actions
     if len(new) > cfg.catchup_max_candles:
@@ -569,6 +632,130 @@ def evaluate_closed_candles(
         inst.probe_side = ""
 
     inst.last_eval_ts = new[-1].ts
+    return actions
+
+
+def _evaluate_box(inst, new: Sequence[Candle], candles: Sequence[Candle],
+                  tf_ms: int, now_s: int, cfg) -> List[Action]:
+    """Close verdicts for BOXES under the 3-candle break-hold
+    (user rule 2026-09-30): close through a pivot = hold opens (still a
+    box); a close back through cancels; BOX_BREAK_HOLD_CANDLES closes
+    with no cancel = breakout. History is re-folded every call, so
+    restarts, catchup caps and instances created mid-hold all behave
+    identically. Probe heads-ups stay pending while the hold runs."""
+    actions: List[Action] = []
+    if inst.state in TERMINAL_STATES:
+        return actions
+    buffer = cfg.breakout_buffer_atr * inst.atr
+    up_level = inst.last_high_price()
+    lo_level = inst.last_low_price()
+    last_ts = max((p["ts"] for p in inst.pivots), default=0)
+    post = [c for c in candles if c.ts > last_ts]
+
+    # state BEFORE this batch (or the full history when the batch is
+    # empty — the backfill path).
+    if new:
+        pre = [c for c in post if c.ts < new[0].ts]
+        late_cutoff = new[-1].ts - 2 * tf_ms
+    else:
+        pre = post
+        late_cutoff = 0
+    side, count, confirmed = box_break_fold(up_level, lo_level, pre, buffer)
+
+    def _clear_probe():
+        inst.probe_msg_id = None
+        inst.probe_candle_ms = 0
+        inst.probe_side = ""
+
+    def _breakout(eside: str, c: Candle, late: bool) -> List[Action]:
+        bar = c.ts // tf_ms
+        level = alert_level_for(inst, eside, bar)
+        kept = inst.probe_msg_id is not None and inst.probe_side == eside
+        payload = {"side": eside, "level": level, "close": c.close,
+                   "candle_ts": c.ts, "late": late}
+        if kept:
+            payload["msg_id"] = inst.probe_msg_id
+            _clear_probe()
+            acts = [Action("breakout_keep", inst, payload)]
+        else:
+            acts = [Action("breakout_post", inst, payload)]
+            if inst.probe_msg_id is not None:
+                # pending heads-up of the OTHER side can never verdict
+                # on a terminal instance — retract it here
+                acts.append(Action("retract", inst, {
+                    "msg_id": inst.probe_msg_id,
+                    "reason": "breakout confirmed on the other side",
+                }))
+                inst.add_event("retract", int(c.ts // 1000),
+                               side=inst.probe_side, stale=True)
+                _clear_probe()
+        inst.state = STATE_BREAKOUT
+        inst.notified["breakout"] = True
+        inst.add_event("breakout", int(c.ts // 1000), side=eside,
+                       close=c.close, level=level, kept=kept)
+        return acts
+
+    # historical confirmation (backfill): the hold confirmed before this
+    # batch — break the box now, once.
+    if confirmed is not None:
+        return _breakout(
+            "up" if (up_level is not None and confirmed.close > up_level - buffer)
+            else "down",
+            confirmed, confirmed.ts < late_cutoff)
+
+    for c in new:
+        bar = c.ts // tf_ms
+        beyond_up = up_level is not None and c.close > up_level + buffer
+        beyond_dn = lo_level is not None and c.close < lo_level - buffer
+        late = c.ts < late_cutoff
+
+        # probe verdict for the candle the heads-up was posted for
+        if inst.probe_msg_id is not None and inst.probe_candle_ms == c.ts:
+            probe_beyond = beyond_up if inst.probe_side == "up" else beyond_dn
+            if not probe_beyond:
+                actions.append(Action("retract", inst, {
+                    "msg_id": inst.probe_msg_id, "candle_ts": c.ts,
+                    "reason": "no break by candle close",
+                }))
+                inst.add_event("retract", int(c.ts // 1000),
+                               side=inst.probe_side)
+                _clear_probe()
+
+        prev_side = side
+        side, count, evs = box_break_hold_step(side, count, c.close,
+                                               up_level, lo_level, buffer)
+        for e in evs:
+            kind, eside = e.split(":")
+            if kind == "open":
+                inst.add_event("break_hold", int(c.ts // 1000), side=eside)
+            elif kind == "cancel":
+                inst.add_event("break_hold_cancel", int(c.ts // 1000),
+                               side=eside)
+                if inst.probe_msg_id is not None and inst.probe_side == eside:
+                    actions.append(Action("retract", inst, {
+                        "msg_id": inst.probe_msg_id, "candle_ts": c.ts,
+                        "reason": "closed back through the pivot within hold",
+                    }))
+                    inst.add_event("retract", int(c.ts // 1000), side=eside)
+                    _clear_probe()
+            elif kind == "confirm":
+                actions.extend(_breakout(eside, c, late))
+                inst.last_eval_ts = new[-1].ts
+                return actions
+
+    # stale probe — NOT while its own hold is still running
+    if new and inst.probe_msg_id is not None and inst.probe_candle_ms and \
+            inst.probe_candle_ms < new[0].ts and not (
+                side and side == inst.probe_side):
+        actions.append(Action("retract", inst, {
+            "msg_id": inst.probe_msg_id, "reason": "stale probe",
+            "stale": True,
+        }))
+        inst.add_event("retract", now_s, side=inst.probe_side, stale=True)
+        _clear_probe()
+
+    if new:
+        inst.last_eval_ts = new[-1].ts
     return actions
 
 
@@ -765,12 +952,32 @@ def _already_broken_side(cand: Candidate, closed_candles, tf_ms: int, cfg) -> Op
         return None
     is_wedge = cand.type in _WEDGE_TYPES
     is_tri = cand.type in _TRIANGLE_TYPES
+    last_ts = cand.refs[-1].ts
+    buffer = cfg.breakout_buffer_atr * cand.atr
+    if cand.type == _BOX_TYPE:
+        # Box rule 2026-09-30: only a HOLD-CONFIRMED breach is
+        # "already broken" (close through + BOX_BREAK_HOLD_CANDLES
+        # closes with no close back). A fresh/uncancelled-yet pierce
+        # is still a box — create it; the hold re-derives from history
+        # on every scan. The old instant rule missed windows whose
+        # last-high came from a live-final pivot (XLM 1d) and, after
+        # re-anchoring, showed a level that history had long cleared.
+        up_level = next((r.price for r in reversed(cand.refs)
+                         if r.is_high), None)
+        lo_level = next((r.price for r in reversed(cand.refs)
+                         if not r.is_high), None)
+        _, _, confirmed = box_break_fold(
+            up_level, lo_level,
+            [c for c in closed_candles if c.ts > last_ts], buffer)
+        if confirmed is None:
+            return None
+        return "up" if (up_level is not None
+                        and confirmed.close > up_level - buffer) \
+            else "down"
     up_level = None if (is_wedge or is_tri) else \
         next((r.price for r in reversed(cand.refs) if r.is_high), None)
     lo_level = None if (is_wedge or is_tri) else \
         next((r.price for r in reversed(cand.refs) if not r.is_high), None)
-    last_ts = cand.refs[-1].ts
-    buffer = cfg.breakout_buffer_atr * cand.atr
     for c in closed_candles:
         if c.ts <= last_ts:
             continue

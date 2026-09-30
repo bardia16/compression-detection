@@ -70,9 +70,22 @@ def test_post_pivot_close_inside_creates_instance():
     assert not any(a.kind == "skip_create" for a in actions)
 
 
-def test_post_pivot_close_beyond_upper_skips_creation():
+def test_single_close_beyond_opens_hold_and_still_creates():
+    """Box rule 2026-09-30: ONE close above the pivot is not yet a break —
+    the hold opens, the box is still a box for the next 3 candles."""
     instances = {}
     candles = [candle(24, 101.0)]                      # close above upper
+    actions = update_for_scan(instances, "AAA", "15m", [BOX], candles,
+                              TF_MS, 1000, CFG)
+    assert len(instances) == 1
+    assert not [a for a in actions if a.kind == "skip_create"]
+
+
+def test_held_close_beyond_upper_skips_creation():
+    """Breaker + 3 closes with no close back below = confirmed break ->
+    already broken, never create."""
+    instances = {}
+    candles = [candle(24 + i, 101.0) for i in range(4)]
     actions = update_for_scan(instances, "AAA", "15m", [BOX], candles,
                               TF_MS, 1000, CFG)
     assert len(instances) == 0
@@ -83,11 +96,23 @@ def test_post_pivot_close_beyond_upper_skips_creation():
     assert skips[0].instance is None
 
 
-def test_earlier_post_pivot_break_also_skips_even_if_reclaimed():
-    """Price breached after the last pivot and came back — the structure
-    still had a live breach event; do not create it."""
+def test_reclaimed_within_hold_creates():
+    """Rule 2026-09-30: a close back through the pivot inside the 3-candle
+    hold cancels the break — 'for the next 3 candles it's still a box'."""
     instances = {}
     candles = [candle(24, 101.0), candle(25, 95.0)]    # breached then inside
+    actions = update_for_scan(instances, "AAA", "15m", [BOX], candles,
+                              TF_MS, 1000, CFG)
+    assert len(instances) == 1
+    assert not [a for a in actions if a.kind == "skip_create"]
+
+
+def test_confirmed_break_skips_even_if_later_reclaimed():
+    """The hold confirmed (breaker + 3) BEFORE price came back — the
+    structure was already broken; the late reclaim changes nothing."""
+    instances = {}
+    candles = ([candle(24 + i, 101.0) for i in range(4)] +
+               [candle(28, 95.0)])
     actions = update_for_scan(instances, "AAA", "15m", [BOX], candles,
                               TF_MS, 1000, CFG)
     assert len(instances) == 0
@@ -188,7 +213,7 @@ def test_agent_skip_emitted_once_per_type():
         metrics={"fit_err_atr": 0.0},
     )
     instances = {}
-    candles = [candle(32, 101.0)]
+    candles = [candle(32 + i, 101.0) for i in range(4)]   # hold-confirmed
     actions = update_for_scan(instances, "AAA", "15m", [big, BOX], candles,
                               TF_MS, 1000, CFG)
     skips = [a for a in actions if a.kind == "skip_create"]

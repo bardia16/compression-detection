@@ -236,10 +236,19 @@ def test_invalidation_when_candidate_disappears():
 # ── close verdicts / breakouts ─────────────────────────────────────────
 
 def test_close_beyond_upper_posts_breakout():
+    """Box break-hold (rule 2026-09-30): the close above only OPENS the
+    hold — still a box for the next 3 candles; the 4th close (3rd
+    follow-up) with no close back below confirms the breakout."""
     refs, cand = box_refs(n=4)
     inst = mk_instance(cand)
-    actions = evaluate_closed_candles(
-        inst, [candle(31, 101.0)], TF_MS, 1000, CFG)
+    hist = []
+    for b in (31, 32, 33):
+        hist.append(candle(b, 101.0))
+        assert evaluate_closed_candles(
+            inst, list(hist), TF_MS, 1000, CFG) == []
+        assert inst.state != STATE_BREAKOUT          # still a box
+    hist.append(candle(34, 101.0))
+    actions = evaluate_closed_candles(inst, hist, TF_MS, 1060, CFG)
     assert [a.kind for a in actions] == ["breakout_post"]
     assert actions[0].detail["side"] == "up"
     assert inst.state == STATE_BREAKOUT
@@ -249,8 +258,13 @@ def test_close_beyond_upper_posts_breakout():
 def test_close_beyond_lower_posts_breakout_down():
     refs, cand = box_refs(n=4)
     inst = mk_instance(cand)
-    actions = evaluate_closed_candles(
-        inst, [candle(31, 89.0)], TF_MS, 1000, CFG)
+    hist = []
+    for b in (31, 32, 33):
+        hist.append(candle(b, 89.0))
+        assert evaluate_closed_candles(
+            inst, list(hist), TF_MS, 1000, CFG) == []
+    hist.append(candle(34, 89.0))
+    actions = evaluate_closed_candles(inst, hist, TF_MS, 1060, CFG)
     assert [a.kind for a in actions] == ["breakout_post"]
     assert actions[0].detail["side"] == "down"
 
@@ -273,7 +287,12 @@ def test_probe_verdict_keep_on_confirmed_close():
     inst.probe_candle_ms = 31 * TF_MS
     inst.probe_side = "up"
 
-    actions = evaluate_closed_candles(inst, [candle(31, 101.0)], TF_MS, 1000, CFG)
+    # the heads-up waits through the hold — no verdict at the breaker close
+    hist = [candle(31, 101.0)]
+    assert evaluate_closed_candles(inst, list(hist), TF_MS, 1000, CFG) == []
+    assert inst.probe_msg_id == 555 and inst.state != STATE_BREAKOUT
+    hist += [candle(32, 101.0), candle(33, 101.0), candle(34, 101.0)]
+    actions = evaluate_closed_candles(inst, hist, TF_MS, 1060, CFG)
     assert [a.kind for a in actions] == ["breakout_keep"]
     assert actions[0].detail["msg_id"] == 555
     assert inst.state == STATE_BREAKOUT
@@ -301,10 +320,16 @@ def test_probe_failed_close_but_opposite_side_broke():
     inst.probe_candle_ms = 31 * TF_MS
     inst.probe_side = "up"
 
-    actions = evaluate_closed_candles(inst, [candle(31, 89.0)], TF_MS, 1000, CFG)
-    kinds = [a.kind for a in actions]
-    assert kinds == ["retract", "breakout_post"]
-    assert actions[1].detail["side"] == "down"
+    # up-probe fails at its close, down-hold OPENS (no instant break)
+    hist = [candle(31, 89.0)]
+    actions = evaluate_closed_candles(inst, list(hist), TF_MS, 1000, CFG)
+    assert [a.kind for a in actions] == ["retract"]
+    assert inst.state != STATE_BREAKOUT
+    # hold confirms after the 3 follow-up closes
+    hist += [candle(32, 89.0), candle(33, 89.0), candle(34, 89.0)]
+    actions = evaluate_closed_candles(inst, hist, TF_MS, 1060, CFG)
+    assert [a.kind for a in actions] == ["breakout_post"]
+    assert actions[0].detail["side"] == "down"
     assert inst.state == STATE_BREAKOUT
 
 
@@ -332,9 +357,13 @@ def test_verdict_uses_pre_update_boundary():
         ref(26, 100.2, "H", "EH"), ref(30, 90.3, "L", "EL"),
         ref(34, 105.0, "H", "EH"), ref(38, 90.6, "L", "EL"),
     ], up=(0.0, 105.0))
+    batch = [candle(31 + i, 101.0) for i in range(4)]   # breaker + 3 holds
     actions = update_for_scan(
-        instances, "AAA", "15m", [shifted], [candle(31, 101.0)], TF_MS, 1060, CFG)
-    assert any(a.kind == "breakout_post" and a.detail["side"] == "up" for a in actions)
+        instances, "AAA", "15m", [shifted], batch, TF_MS, 1060, CFG)
+    post = [a for a in actions
+            if a.kind == "breakout_post" and a.detail["side"] == "up"]
+    assert post
+    assert post[0].detail["level"] == 100.5             # PRE-update boundary
     assert inst.state == STATE_BREAKOUT
 
 
@@ -352,11 +381,11 @@ def test_catchup_cap_skips_old_breakouts():
 def test_idempotent_double_evaluation():
     refs, cand = box_refs(n=4)
     inst = mk_instance(cand)
-    c = candle(31, 101.0)
-    a1 = evaluate_closed_candles(inst, [c], TF_MS, 1000, CFG)
+    batch = [candle(31 + i, 101.0) for i in range(4)]
+    a1 = evaluate_closed_candles(inst, batch, TF_MS, 1000, CFG)
     assert [a.kind for a in a1] == ["breakout_post"]
-    # same call again — candle already evaluated (and instance terminal)
-    a2 = evaluate_closed_candles(inst, [c], TF_MS, 1060, CFG)
+    # same call again — instance terminal (and candles evaluated)
+    a2 = evaluate_closed_candles(inst, batch, TF_MS, 1060, CFG)
     assert a2 == []
 
 
@@ -365,13 +394,66 @@ def test_idempotent_double_evaluation():
 def test_breakout_level_is_last_pivot_price():
     refs, cand = box_refs(n=4)
     inst = mk_instance(cand)
-    actions = evaluate_closed_candles(inst, [candle(31, 101.0)], TF_MS, 1000, CFG)
+    actions = evaluate_closed_candles(
+        inst, [candle(31 + i, 101.0) for i in range(4)], TF_MS, 1000, CFG)
     assert actions[0].detail["level"] == 100.5        # last EH, not line (100.0)
 
     refs2, cand2 = box_refs(n=4)
     inst2 = mk_instance(cand2)
-    actions2 = evaluate_closed_candles(inst2, [candle(31, 89.0)], TF_MS, 1000, CFG)
+    actions2 = evaluate_closed_candles(
+        inst2, [candle(31 + i, 89.0) for i in range(4)], TF_MS, 1000, CFG)
     assert actions2[0].detail["level"] == 90.5        # last EL
+
+
+def test_box_break_hold_step_machinery():
+    """Rule 2026-09-30: open -> 3 follow-up closes -> confirm; a close
+    back through the pivot cancels."""
+    from compression_detection.lifecycle import box_break_hold_step
+    side, count, ev = box_break_hold_step("", 0, 101.0, 100.5, 90.5, 0.0)
+    assert (side, count, ev) == ("up", 0, ["open:up"])
+    for want in (1, 2):
+        side, count, ev = box_break_hold_step(side, count, 101.0,
+                                              100.5, 90.5, 0.0)
+        assert (count, ev) == (want, [])
+        assert side == "up"                          # still a box
+    side, count, ev = box_break_hold_step(side, count, 101.0,
+                                          100.5, 90.5, 0.0)
+    assert ev == ["confirm:up"] and side == "" and count == 0
+
+    side, count, ev = box_break_hold_step("", 0, 101.0, 100.5, 90.5, 0.0)
+    side, count, ev = box_break_hold_step(side, count, 99.0, 100.5, 90.5, 0.0)
+    assert ev == ["cancel:up"] and side == ""        # reclaimed = still a box
+
+    # mirror: down hold
+    side, count, ev = box_break_hold_step("", 0, 89.0, 100.5, 90.5, 0.0)
+    assert ev == ["open:down"]
+    side, count, ev = box_break_hold_step(side, count, 95.0, 100.5, 90.5, 0.0)
+    assert ev == ["cancel:down"]
+
+
+def test_box_backfill_breaks_historical_hold():
+    """XLM 1d: every confirming candle predates last_eval_ts — the box
+    must still break on the first evaluation (backfill), not at the
+    next close."""
+    refs, cand = box_refs(n=4)
+    inst = mk_instance(cand)
+    candles = [candle(31 + i, 101.0) for i in range(4)]
+    inst.last_eval_ts = candles[-1].ts          # fully evaluated already
+    actions = evaluate_closed_candles(inst, candles, TF_MS, 1000, CFG)
+    assert [a.kind for a in actions] == ["breakout_post"]
+    assert actions[0].detail["side"] == "up"
+    assert inst.state == STATE_BREAKOUT
+
+
+def test_box_history_inside_keeps_box_alive():
+    """Breaker cancelled in history: no breakout, no actions, box stays."""
+    refs, cand = box_refs(n=4)
+    inst = mk_instance(cand)
+    candles = [candle(31, 101.0), candle(32, 95.0)]
+    inst.last_eval_ts = candles[-1].ts
+    actions = evaluate_closed_candles(inst, candles, TF_MS, 1000, CFG)
+    assert actions == []
+    assert inst.state != STATE_BREAKOUT
 
 
 def test_triangle_line_break_kills_pattern_before_level():

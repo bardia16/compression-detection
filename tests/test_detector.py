@@ -350,30 +350,31 @@ def test_box_rejected_when_upper_drifts():
     assert TYPE_BOX not in types_of(cands)
 
 
-def test_box_equality_band_rejects_beyond_2x_atr():
-    """Box equality = 2 x ATR (user rule 2026-09-28). A low 4.5 apart
-    ( > 2 x ATR 2.0) kills every end-anchored window even though the
-    forced label strings say EL — strings are no longer consulted."""
+def test_box_equality_band_rejects_beyond_3x_atr():
+    """Box equality = 3 x ATR (2.0 -> 3.0, user rule 2026-09-30 — more
+    forgiving about finding equals, but the chain still rejects: a low
+    6.5/7.0 apart (> 3 x ATR 6.0) kills every end-anchored window even
+    though the forced label strings say EL — strings are not consulted."""
     cands = detect([
         ("H", 100.0, 10, None),
         ("L", 90.0, 14, None),
         ("H", 100.5, 18, "EH"),
-        ("L", 94.5, 22, "EL"),    # delta 4.5 > 2 x ATR
+        ("L", 96.5, 22, "EL"),    # delta 6.5 > 3 x ATR
         ("H", 100.2, 26, "EH"),
-        ("L", 90.5, 30, "EL"),
+        ("L", 89.5, 30, "EL"),    # delta 7.0 > 3 x ATR in every window
     ], last_bar=32)
     assert TYPE_BOX not in types_of(cands)
 
 
-def test_box_equality_band_accepts_within_2x_atr():
-    """Taps between 1x and 2x ATR are EQUAL for boxes now (old string
-    labeling would have called 90 -> 93 an HL and killed the box).
-    Non-monotonic side keeps the flat-drift gate honest."""
+def test_box_equality_band_accepts_within_3x_atr():
+    """Taps between 1x and 3x ATR are EQUAL for boxes now (the 2026-09-30
+    forgiveness bump: 90 -> 95 = 2.5 x ATR used to be rejected at the old
+    2x band). Non-monotonic side keeps the flat-drift gate honest."""
     cands = detect([
         ("H", 100.0, 10, None),
         ("L", 90.0, 14, None),
         ("H", 100.5, 18, "EH"),
-        ("L", 93.0, 22, "HL"),    # delta 3.0 <= 2 x ATR -> equal for box
+        ("L", 95.0, 22, "HL"),    # delta 5.0 <= 3 x ATR -> equal for box
         ("H", 100.3, 26, "EH"),
         ("L", 90.8, 30, "EL"),
     ], last_bar=32)

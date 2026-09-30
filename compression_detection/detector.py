@@ -266,10 +266,13 @@ def _label_ok(
 
 
 # Box equality band (user rule 2026-09-28, MINA case): a box accepts
-# taps up to 2 x ATR14 apart (max-of-both, same flavor as dow) — the
-# looser band is SCOPED to the box spec: triangles and the potential
-# break keep the global 1.0 labeling from dow.
-BOX_EQ_COEF = 2.0
+# taps up to BOX_EQ_COEF x ATR14 apart (max-of-both, same flavor as
+# dow) — the looser band is SCOPED to the box spec: triangles and the
+# potential break keep the global 1.0 labeling from dow.
+# 2026-09-30: breaker/segment variant REVERTED (a box needs two equal
+# taps per side — no single-tap boundaries); coef raised 2.0 -> 3.0 so
+# the chain is more forgiving about finding equals.
+BOX_EQ_COEF = 3.0
 
 
 def _box_eq_ok(refs: Sequence[PivotRef],

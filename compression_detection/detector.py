@@ -265,45 +265,37 @@ def _label_ok(
     return True
 
 
-# Box equality band (user rule 2026-09-28, MINA case): a box accepts
-# taps up to 2 x ATR14 apart (max-of-both, same flavor as dow) — the
-# looser band is SCOPED to the box spec: triangles and the potential
-# break keep the global 1.0 labeling from dow.
+# Box equality band (user rule 2026-09-28, MINA case): same-side box
+# taps sit up to 2 x ATR14 apart (max-of-both, same flavor as dow) —
+# the looser band is SCOPED to the box spec: triangles and the
+# potential break keep the global 1.0 labeling from dow.
+# 2026-09-29 (JUP): a tap that jumps past the band is a BREAKER — it
+# starts a new flat segment instead of rejecting the window; the pivot
+# sequence never shrinks and never restarts. Lines + drift come from
+# the LAST segment only.
 BOX_EQ_COEF = 2.0
 
 
-def _box_eq_ok(refs: Sequence[PivotRef],
-               atr14_series: List[Optional[float]]) -> bool:
-    """Geometric equality for a box window: every non-first high/low
-    within BOX_EQ_COEF x ATR of its predecessor of the same side
-    (first of each side exempt — box's first-pivot exemptions).
-    Judged HERE at 2x instead of on the precomputed 1x labels; the
-    precomputed label strings are not consulted for boxes."""
-    def _thr(i: int, j: int) -> Optional[float]:
-        vals = [atr14_series[k] for k in (i, j)
+def _box_segments(side_refs: Sequence[PivotRef],
+                  atr14_series: List[Optional[float]]) -> List[List[PivotRef]]:
+    """Split one side's box pivots into flat segments: a same-side jump
+    > BOX_EQ_COEF x ATR14 (max-of-both; ATR missing = never a breaker)
+    starts a new segment with the jumping pivot. Breakers stay IN the
+    window — they just don't shape the boundary lines."""
+    segs: List[List[PivotRef]] = []
+    for r in side_refs:
+        if not segs:
+            segs.append([r])
+            continue
+        prev = segs[-1][-1]
+        vals = [atr14_series[k] for k in (r.bar_index, prev.bar_index)
                 if k < len(atr14_series) and atr14_series[k]]
-        return BOX_EQ_COEF * max(vals) if vals else None
-
-    seen_h = seen_l = False
-    prev_h = prev_l = None
-    for r in refs:
-        if r.is_high:
-            if not seen_h:
-                seen_h, prev_h = True, r
-                continue
-            thr = _thr(r.bar_index, prev_h.bar_index)
-            if thr is None or abs(r.price - prev_h.price) > thr:
-                return False
-            prev_h = r
+        thr = BOX_EQ_COEF * max(vals) if vals else None
+        if thr is not None and abs(r.price - prev.price) > thr:
+            segs.append([r])
         else:
-            if not seen_l:
-                seen_l, prev_l = True, r
-                continue
-            thr = _thr(r.bar_index, prev_l.bar_index)
-            if thr is None or abs(r.price - prev_l.price) > thr:
-                return False
-            prev_l = r
-    return True
+            segs[-1].append(r)
+    return segs
 
 
 def _check_window(
@@ -337,15 +329,23 @@ def _check_window(
     if atr is None or atr <= 0:
         return None
 
-    if spec.name == TYPE_BOX:
-        # boxes: equality at 2 x ATR, judged geometrically (BOX_EQ_COEF)
-        if not _box_eq_ok(refs, atr14_series):
-            return None
-    elif not _label_ok(refs, spec):
+    if spec.name != TYPE_BOX and not _label_ok(refs, spec):
         return None
+    # Boxes skip the label gate; their equality is judged geometrically
+    # in the box branch below (_box_segments) — breakers never reject.
 
-    upper_pts = [(r.abs_bar, r.price) for r in highs]
-    lower_pts = [(r.abs_bar, r.price) for r in lows]
+    if spec.name == TYPE_BOX:
+        # Last flat segment draws the line (user rule 2026-09-29, JUP):
+        # breaker pivots stay in the window (sequence preserved, hits,
+        # span, close-integrity all unchanged) but boundary + drift use
+        # only the last segment's taps — breakers are boundary-exempt.
+        tap_h = _box_segments(highs, atr14_series)[-1]
+        tap_l = _box_segments(lows, atr14_series)[-1]
+        upper_pts = [(r.abs_bar, r.price) for r in tap_h]
+        lower_pts = [(r.abs_bar, r.price) for r in tap_l]
+    else:
+        upper_pts = [(r.abs_bar, r.price) for r in highs]
+        lower_pts = [(r.abs_bar, r.price) for r in lows]
     if spec.name == TYPE_BOX:
         # Boxes are HORIZONTAL (user rule 2026-09-28): a box is a flat
         # range — each side's line is the mean of its pivots with slope
@@ -361,7 +361,7 @@ def _check_window(
             span_atr = max(av) if av else atr
             return (abs(side_refs[-1].price - side_refs[0].price)
                     <= cfg.flat_tol_atr * span_atr)
-        if not _drift_ok(highs) or not _drift_ok(lows):
+        if not _drift_ok(tap_h) or not _drift_ok(tap_l):
             return None
         # Center between the side's extreme taps (minimax): minimizes
         # the worst tap-to-line distance, which is what the boundary

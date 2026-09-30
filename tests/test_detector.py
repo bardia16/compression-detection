@@ -277,15 +277,29 @@ RANGE_ENTRIES = [
 ]
 
 
-def test_range_box_rejected_when_flag_off():
-    """Strict model: interleaved internal swings break the EH/EL chain."""
+def test_internal_swings_tolerated_flag_off():
+    """User rule 2026-09-29 (JUP): interleaved internal swings are eq
+    BREAKERS — they stay in the window (sequence never shrinks) and the
+    lines come from the last flat segment (the touch cluster). Flag off
+    = prod config."""
     cands = detect_with_candles(RANGE_ENTRIES, 32,
                                 candles_for([(b, 95.0) for b in range(10, 31)]))
-    assert TYPE_BOX not in types_of(cands)
+    boxes = [c for c in cands if c.type == TYPE_BOX]
+    assert boxes
+    assert any(len(b.refs) == 6 for b in boxes)   # full sequence kept
+    b = boxes[0]
+    assert b.upper.intercept == 101.5             # last-segment taps only
+    assert b.lower.intercept == 88.5
+    assert b.metrics["upper_at_last_bar"] == 101.5
+    assert b.metrics["lower_at_last_bar"] == 88.5
+    assert b.metrics["close_breaches_upper"] <= 2
+    assert b.metrics["close_breaches_lower"] <= 2
 
 
 def test_range_box_detected_when_flag_on():
-    """Touch clusters + overlap → textbook range with internal swings."""
+    """Touch clusters + internal swings still detect with the flag on —
+    the main path accepts breakers now, so the range fallback isn't
+    even needed for this fixture."""
     cands = detect_with_candles(
         RANGE_ENTRIES, 32,
         candles_for([(b, 95.0) for b in range(10, 31)]),
@@ -294,10 +308,30 @@ def test_range_box_detected_when_flag_on():
     boxes = [c for c in cands if c.type == TYPE_BOX]
     assert boxes
     b = boxes[0]
-    assert b.metrics["mode"] == "range"
-    assert b.metrics["upper_touches"] == 2 and b.metrics["lower_touches"] == 2
+    assert b.upper.intercept == 101.5
+    assert b.lower.intercept == 88.5
     assert b.metrics["upper_at_last_bar"] == 101.5
     assert b.metrics["lower_at_last_bar"] == 88.5
+
+
+def test_range_mode_fallback_metrics():
+    """_check_box_range (the flag-on fallback) keeps its own metrics —
+    called directly since the main path now passes for RANGE_ENTRIES."""
+    from compression_detection.detector import _check_box_range
+    refs = [
+        PivotRef(ts=p.ts, bar_index=p.bar_index, abs_bar=p.bar_index,
+                 price=p.price, is_high=(p.type == 1),
+                 label=(lab.value if lab else None))
+        for p, lab in entries_to_labeled(RANGE_ENTRIES)
+    ]
+    cfg = DetectConfig(min_pivots=MIN_PIVOTS, box_range_mode=True)
+    cand = _check_box_range(refs, atr_series(), cfg,
+                            {b: 95.0 for b in range(10, 31)})
+    assert cand is not None
+    assert cand.metrics["mode"] == "range"
+    assert cand.metrics["upper_touches"] == 2 and cand.metrics["lower_touches"] == 2
+    assert cand.metrics["upper_at_last_bar"] == 101.5
+    assert cand.metrics["lower_at_last_bar"] == 88.5
 
 
 def test_range_box_needs_both_sides_tested_in_common_stretch():
@@ -428,15 +462,16 @@ def test_old_pivots_filtered_by_age():
 
 
 def test_boundary_crossing_rejected():
-    """Upper and lower lines cross inside the window."""
+    """Upper and lower (last-segment) lines cross inside the window."""
     cands = detect([
         ("H", 100.0, 10, None),
-        ("L", 90.0, 14, None),
-        ("H", 90.5, 18, "LH"),   # upper now below lower-region
-        ("L", 90.2, 22, "EL"),
+        ("L", 90.5, 14, None),
+        ("H", 90.0, 18, "LH"),   # breaker vs H100 -> its own segment
+        ("L", 91.5, 22, "HL"),
     ], last_bar=24)
-    # upper fit through (10,100)-(18,90.5), lower through (14,90)-(22,90.2):
-    # width goes negative inside the span -> everything must be rejected.
+    # last-segment lines: upper = 90.0 (single tap), lower =
+    # mid(90.5, 91.5) = 91.0 -> upper below lower across the whole
+    # span -> crossing gate must reject.
     assert cands == []
 
 

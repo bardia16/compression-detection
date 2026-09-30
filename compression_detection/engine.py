@@ -399,12 +399,18 @@ class Engine:
 
             fresh_s = (now_s - POTENTIAL_FRESH_S) * 1000
             hits = []
-            # sticky-potential display (user rule 2026-09-30): per-side
-            # freshest UNALERTED hit (survives spent-touch + legacy-flag +
-            # 12h freshness) — written even when nothing fires, so the
-            # watchlist compressions tab always mirrors the real state.
-            disp: Dict[str, Optional[dict]] = {"long": None, "short": None}
+            # sticky-potential display: per side the UNFILTERED freshest
+            # pattern (since_touch_ts=0 — fired or not); disp is built
+            # AFTER the fire decision below so `fired` reflects this pass.
+            all_hits: Dict[str, Optional[dict]] = {}
             for side in ("long", "short"):
+                all_hits[side] = find_potential(side, main_candles, scan,
+                                                self.cfg, main_tf=inst.tf,
+                                                anchor_ts=inst.anchor_ts,
+                                                box_at=box_at,
+                                                touch_atr=inst.atr,
+                                                since_touch_ts=0,
+                                                for_display=True)
                 # one alert PER TOUCH (user rule 2026-09-27 evening): the
                 # touch that fired is stored; the side re-arms only on a
                 # strictly NEWER touch. Flags written before that rule have
@@ -426,20 +432,42 @@ class Engine:
                 # older than 12h is old news.
                 if hit["confirm_ts"] < fresh_s:
                     continue
-                disp[side] = {"pattern_tf": hit["pattern_tf"],
-                              "swing_ts": hit["confirm_ts"],
-                              "touch_ts": hit["touch_ts"]}
                 hit["side"] = side
                 hits.append(hit)
 
-            inst.potential_hits = disp
             if not hits:
+                inst.potential_hits = self._build_potential_disp(
+                    inst, all_hits, fresh_s)
                 continue
             # ONE per box: the freshest confirmation wins (a tie keeps the
             # earlier list order — long first).
             hits.sort(key=lambda h: h["confirm_ts"], reverse=True)
             out.append(self._register_potential(inst, hits[0], now_s))
+            inst.potential_hits = self._build_potential_disp(
+                inst, all_hits, fresh_s)
         return out
+
+    @staticmethod
+    def _build_potential_disp(inst, all_hits, fresh_s) -> Dict[str, Optional[dict]]:
+        """sticky-potential display (user rule 2026-09-30, rev. "show fired
+        too"): per side the UNFILTERED freshest pattern inside the 12h
+        window — shown even when its touch already alerted; `fired` marks
+        it for the tooltip. MUST be called AFTER any fire decision so
+        `fired` reflects the current pass's notified state."""
+        disp: Dict[str, Optional[dict]] = {"long": None, "short": None}
+        for side, ha in all_hits.items():
+            if ha is None or ha["confirm_ts"] < fresh_s:
+                continue
+            spent = inst.notified.get(f"potential_{side}_touch_ts")
+            legacy = spent is None and inst.notified.get(f"potential_{side}")
+            disp[side] = {
+                "pattern_tf": ha["pattern_tf"],
+                "swing_ts": ha["confirm_ts"],
+                "touch_ts": ha["touch_ts"],
+                "fired": bool(legacy or (spent is not None
+                                         and ha["touch_ts"] <= spent)),
+            }
+        return disp
 
     @staticmethod
     def _box_at_fn(inst):
@@ -848,127 +876,162 @@ class Engine:
             except Exception as exc:
                 log.error("scan failed: %s", exc, exc_info=True)
 
-    # ── fast proximity pass (user rule 2026-09-28) ────────────────────
+    # ── fast proximity pass (user rule 2026-09-28, display rev 2026-09-30) ──
     async def _proximity_pass(self, ses) -> List[dict]:
-        """Evaluate the potential trigger every PROXIMITY_POLL_S instead of
-        waiting for the next scan. Bands/ATRs come from the last scan's
-        cached candles; a tf inside the zone gets a FRESH fetch before the
-        trigger is judged (the HL may have just printed)."""
-        sends: List[dict] = []
-        pending = []
-        for inst in self.instances.values():
-            if inst.type != "box" or inst.state in TERMINAL_STATES:
-                continue
-            live_sides = []
-            for side in ("long", "short"):
+            """Fast pass: evaluate potential triggers + refresh the sticky-
+            potential DISPLAY every PROXIMITY_POLL_S (60s).
+
+            Display (user rule 2026-09-30, AKE case): EVERY active box gets a
+            zone-free display evaluation each pass — find_potential with
+            for_display=True skips ONLY the current-price zone gate, so a
+            fired or drifted pattern stays on the website until it ages out
+            of the 12h window. Firing stays byte-identical to the previous
+            pass: live-price zone pre-gate on cached candles, only unfired
+            sides, same gates (for_display=False everywhere on that path).
+            """
+            sends: List[dict] = []
+            boxes = [i for i in self.instances.values()
+                     if i.type == "box" and i.state not in TERMINAL_STATES]
+            if not boxes:
+                return sends
+
+            # firing candidates: sides not yet spent (unchanged semantics)
+            pending = []
+            live_by_id: Dict[str, List[str]] = {}
+            for inst in boxes:
+                live_sides = []
+                for side in ("long", "short"):
+                    spent = inst.notified.get(f"potential_{side}_touch_ts")
+                    if spent is None and inst.notified.get(f"potential_{side}"):
+                        continue          # pre-touch flag — one-shot, spent
+                    live_sides.append(side)
+                live_by_id[inst.id] = live_sides
+                if live_sides:
+                    pending.append(inst)
+
+            prices: Dict[str, float] = {}
+            for sym in sorted({i.symbol for i in pending}):
+                prices[sym] = await fetch_last_price(ses, sym)
+
+            now_s = int(time.time())
+            fresh_s = (now_s - POTENTIAL_FRESH_S) * 1000
+            dirty = False
+            for inst in boxes:
+                box_at = self._box_at_fn(inst)
+                if box_at is None:
+                    continue
+                tfs = [*LOWER_TF.get(inst.tf, []), inst.tf]
+
+                # fresh candles for EVERY active box (display refresh runs
+                # ungated; fetch failures fall back to the scan cache so a
+                # blip never blanks the column)
+                fresh: Dict[str, list] = {}
+                for tf in tfs:
+                    try:
+                        fresh[tf] = await fetch_klines(
+                            ses, inst.symbol, tf, self.cfg.candle_limit)
+                    except Exception as exc:
+                        log.warning("proximity fetch %s %s failed: %s",
+                                    inst.symbol, tf, exc)
+                        fresh[tf] = None
+                    if not fresh[tf]:
+                        fresh[tf] = self._last_candles.get((inst.symbol, tf))
+                main = fresh.get(inst.tf)
+                if not main:
+                    continue
+                scan = [(tf, fresh[tf]) for tf in tfs
+                        if tf != inst.tf and fresh.get(tf)]
+
+                # ── display refresh (ungated, zone-free, both sides) ──────
+                all_hits: Dict[str, Optional[dict]] = {}
+                for side in ("long", "short"):
+                    all_hits[side] = find_potential(
+                        side, main, scan, self.cfg, main_tf=inst.tf,
+                        anchor_ts=inst.anchor_ts, box_at=box_at,
+                        touch_atr=inst.atr, since_touch_ts=0,
+                        for_display=True)
+                disp = self._build_potential_disp(inst, all_hits, fresh_s)
+                if disp != inst.potential_hits:
+                    inst.potential_hits = disp
+                    dirty = True
+
+                # ── firing (unchanged): unfired sides + live zone pre-gate ─
+                live_sides = live_by_id.get(inst.id) or []
+                if not live_sides:
+                    continue
+                price = prices.get(inst.symbol) or 0.0
+                if price <= 0:
+                    continue
+                near: Dict[str, List[str]] = {}
+                for tf in tfs:
+                    cached = self._last_candles.get((inst.symbol, tf))
+                    if not cached:
+                        continue
+                    a14 = atr_series(cached, self.cfg.atr14_length,
+                                     self.cfg.atr14_method)
+                    if not a14 or not a14[-1]:
+                        continue
+                    band = PROX_BAND_ATR * a14[-1]
+                    up, lo = box_at(cached[-1].ts)
+                    sides = []
+                    if "long" in live_sides and up is not None \
+                            and up - band <= price <= up:
+                        sides.append("long")
+                    if "short" in live_sides and lo is not None \
+                            and lo <= price <= lo + band:
+                        sides.append("short")
+                    if sides:
+                        near[tf] = sides
+                if not near:
+                    continue
+
+                # in zone somewhere: fresh candles for the zone tfs + own tf
+                fire_main = fresh.get(inst.tf)
+                if not fire_main:
+                    continue
+                fire_scan = [(tf, fresh[tf]) for tf in tfs
+                             if tf != inst.tf and fresh.get(tf)]
+
+                hits = []
+                for side in sorted({s for ss in near.values() for s in ss}):
+                    spent = inst.notified.get(f"potential_{side}_touch_ts")
+                    if spent is None and inst.notified.get(f"potential_{side}"):
+                        continue
+                    hit = find_potential(side, fire_main, fire_scan, self.cfg,
+                                         main_tf=inst.tf,
+                                         anchor_ts=inst.anchor_ts,
+                                         box_at=box_at, touch_atr=inst.atr,
+                                         since_touch_ts=spent or 0,
+                                         live_price=price)
+                    if hit is None:
+                        continue
+                    if spent is not None and hit["touch_ts"] <= spent:
+                        continue
+                    if hit["confirm_ts"] < fresh_s:
+                        continue
+                    hit["side"] = side
+                    hits.append(hit)
+                if not hits:
+                    continue
+
+                hits.sort(key=lambda h: h["confirm_ts"], reverse=True)
+                win = hits[0]
+                # re-check AFTER the awaits — a scan may have spent this touch
+                side = win["side"]
                 spent = inst.notified.get(f"potential_{side}_touch_ts")
                 if spent is None and inst.notified.get(f"potential_{side}"):
-                    continue          # pre-touch flag — one-shot, spent
-                live_sides.append(side)
-            if live_sides:
-                pending.append((inst, live_sides))
-        if not pending:
+                    continue
+                if spent is not None and win["touch_ts"] <= spent:
+                    continue
+                action = self._register_potential(inst, win, now_s)
+                sends.extend(await self._dispatch(
+                    [action], ses, {(inst.symbol, tf): c
+                                    for tf, c in fresh.items() if c}))
+                self._save_state()
+            if dirty:
+                self._save_state()
             return sends
 
-        prices: Dict[str, float] = {}
-        for sym in sorted({i.symbol for i, _ in pending}):
-            prices[sym] = await fetch_last_price(ses, sym)
-
-        now_s = int(time.time())
-        fresh_s = (now_s - POTENTIAL_FRESH_S) * 1000
-        for inst, live_sides in pending:
-            price = prices.get(inst.symbol) or 0.0
-            if price <= 0:
-                continue
-            box_at = self._box_at_fn(inst)
-            if box_at is None:
-                continue
-            tfs = [*LOWER_TF.get(inst.tf, []), inst.tf]
-
-            # per-tf close-zone pre-gate on the cached candles
-            near: Dict[str, List[str]] = {}
-            for tf in tfs:
-                cached = self._last_candles.get((inst.symbol, tf))
-                if not cached:
-                    continue
-                a14 = atr_series(cached, self.cfg.atr14_length,
-                                 self.cfg.atr14_method)
-                if not a14 or not a14[-1]:
-                    continue
-                band = PROX_BAND_ATR * a14[-1]
-                up, lo = box_at(cached[-1].ts)
-                sides = []
-                if "long" in live_sides and up is not None \
-                        and up - band <= price <= up:
-                    sides.append("long")
-                if "short" in live_sides and lo is not None \
-                        and lo <= price <= lo + band:
-                    sides.append("short")
-                if sides:
-                    near[tf] = sides
-            if not near:
-                continue
-
-            # in zone somewhere: fresh candles for the zone tfs + own tf
-            fresh: Dict[str, list] = {}
-            for tf in dict.fromkeys([*near, inst.tf]):
-                try:
-                    fresh[tf] = await fetch_klines(
-                        ses, inst.symbol, tf, self.cfg.candle_limit)
-                except Exception as exc:
-                    log.warning("proximity fetch %s %s failed: %s",
-                                inst.symbol, tf, exc)
-                    fresh[tf] = None
-            if not fresh.get(inst.tf):
-                continue
-            scan = [(tf, fresh[tf]) for tf in tfs
-                    if tf != inst.tf and fresh.get(tf)]
-
-            hits = []
-            disp: Dict[str, Optional[dict]] = {"long": None, "short": None}
-            for side in sorted({s for ss in near.values() for s in ss}):
-                spent = inst.notified.get(f"potential_{side}_touch_ts")
-                if spent is None and inst.notified.get(f"potential_{side}"):
-                    continue
-                hit = find_potential(side, fresh[inst.tf], scan, self.cfg,
-                                     main_tf=inst.tf,
-                                     anchor_ts=inst.anchor_ts,
-                                     box_at=box_at, touch_atr=inst.atr,
-                                     since_touch_ts=spent or 0,
-                                     live_price=price)
-                if hit is None:
-                    continue
-                if spent is not None and hit["touch_ts"] <= spent:
-                    continue
-                if hit["confirm_ts"] < fresh_s:
-                    continue
-                disp[side] = {"pattern_tf": hit["pattern_tf"],
-                              "swing_ts": hit["confirm_ts"],
-                              "touch_ts": hit["touch_ts"]}
-                hit["side"] = side
-                hits.append(hit)
-            # sticky-potential display (user rule 2026-09-30): sides not
-            # in zone this pass clear — persist even without sends so the
-            # watchlist tab sees the clear within this 60 s pass.
-            inst.potential_hits = disp
-            if not hits:
-                self._save_state()
-                continue
-
-            hits.sort(key=lambda h: h["confirm_ts"], reverse=True)
-            win = hits[0]
-            # re-check AFTER the awaits — a scan may have spent this touch
-            side = win["side"]
-            spent = inst.notified.get(f"potential_{side}_touch_ts")
-            if spent is None and inst.notified.get(f"potential_{side}"):
-                continue
-            if spent is not None and win["touch_ts"] <= spent:
-                continue
-            action = self._register_potential(inst, win, now_s)
-            sends.extend(await self._dispatch(
-                [action], ses, dict(fresh)))
-            self._save_state()
-        return sends
 
     async def _proximity_loop(self, stop: asyncio.Event,
                               ses: aiohttp.ClientSession) -> None:

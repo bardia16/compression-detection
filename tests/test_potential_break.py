@@ -433,15 +433,17 @@ def test_actions_skip_already_flagged_side(cfg, monkeypatch):
     acts = e._potential_actions({inst.id: inst},
                                 {(inst.symbol, "1h"): mk(long_path())}, now_s=NOW_S)
     assert acts == []
-    # display mirrors the same state: a legacy-flagged side is never
-    # re-evaluated, so its sticky-potential cell is empty
-    assert (inst.potential_hits or {}).get("long") is None
+    # rev. "show fired too" (2026-09-30): the pattern still DISPLAYS for
+    # a flagged side, marked fired — it just never re-alerts
+    hits = inst.potential_hits or {}
+    assert hits.get("long") and hits["long"]["fired"] is True
+    assert hits["long"]["pattern_tf"] == "1h"
 
 
-def test_potential_hits_stored_and_cleared(cfg, monkeypatch):
-    """sticky-potential display (user rule 2026-09-30): the freshest
-    unalerted hit per side lands in inst.potential_hits; once the touch
-    fires, the next pass clears it (nothing unalerted remains)."""
+def test_potential_hits_show_fired_and_clear(cfg, monkeypatch):
+    """sticky-potential display (rev. 2026-09-30 'show fired too'): the
+    unfiltered pattern is shown even after its touch alerted (fired=True);
+    it clears only when the pattern itself leaves (<12h window / zone)."""
     e = _engine(cfg, monkeypatch)
     inst = _inst()
     key = {(inst.symbol, "1h"): mk(long_path()),
@@ -449,12 +451,19 @@ def test_potential_hits_stored_and_cleared(cfg, monkeypatch):
     acts = e._potential_actions({inst.id: inst}, key, now_s=NOW_S)
     assert len(acts) == 1
     hits = inst.potential_hits or {}
-    assert hits.get("long"), hits
     assert hits["long"]["pattern_tf"] == "1h"
+    assert hits["long"]["fired"] is True      # alerted in THIS pass
     assert isinstance(hits["long"]["swing_ts"], int)
-    assert hits.get("short") is None        # long fixture has no EL touch
-    # same touch next pass -> fired already -> display clears both sides
+    assert hits.get("short") is None          # long fixture has no EL touch
+    # same touch next pass: no re-fire, but the PATTERN still displays
     e._potential_actions({inst.id: inst}, key, now_s=NOW_S + 600)
+    hits2 = inst.potential_hits or {}
+    assert hits2["long"]["fired"] is True
+    # pattern leaves the data (flat path) -> display clears
+    e._potential_actions({inst.id: inst},
+                         {(inst.symbol, "1h"): mk(_line(100, 100, 40)),
+                          (inst.symbol, "15m"): mk(_line(100, 100, 40))},
+                         now_s=NOW_S + 1200)
     assert (inst.potential_hits or {}).get("long") is None
     assert (inst.potential_hits or {}).get("short") is None
 
@@ -873,6 +882,76 @@ def test_proximity_pass_silent_when_price_past_the_line(cfg, monkeypatch):
     sends = asyncio.run(e._proximity_pass(None))
     assert sends == []
     assert not inst.notified.get("potential_long")
+
+
+# ── display mode (user rule 2026-09-30, AKE case) ────────────────────
+def test_display_mode_skips_zone_gate():
+    """for_display shows the PATTERN even when live price has walked away
+    from the boundary — AKE: the alert fired, price left the zone, the
+    cell blanked. Firing keeps rejecting the same input."""
+    c = mk(long_path())
+    assert fp(c, "long", CFG, live_price=95.0, for_display=True) is not None
+    assert fp(c, "long", CFG, live_price=95.0) is None
+
+
+def test_display_mode_shows_price_past_the_line():
+    c = mk(long_path())
+    assert fp(c, "long", CFG, live_price=115.0, for_display=True) is not None
+    assert fp(c, "long", CFG, live_price=115.0) is None
+
+
+def test_scan_display_survives_candle_walk_away(cfg, monkeypatch):
+    """Scan pass: the swing tf's own close walked out of the zone — no
+    fire (zone gate), but the display cell stays populated."""
+    e = _engine(cfg, monkeypatch)
+    inst = _inst()
+    acts = e._potential_actions(
+        {inst.id: inst},
+        {(inst.symbol, "1h"): mk(short_path(end=105.0, tail_n=12))},
+        now_s=NOW_S)
+    assert acts == []                       # firing: zone gate rejects
+    hits = inst.potential_hits or {}
+    assert hits.get("short"), hits          # display: pattern still shown
+    assert hits["short"]["pattern_tf"] == "1h"
+    assert hits["short"]["fired"] is False
+
+
+def test_proximity_display_refresh_out_of_zone(cfg, monkeypatch):
+    """60s display refresh is UNGATED: live price far from the boundary
+    still writes the cell (firing stays silent — old code `continue`d
+    here before any display write)."""
+    e = _engine(cfg, monkeypatch)
+    inst = _inst()
+    _stub_prox_env(monkeypatch, e, inst, price=95.0)   # far from lines
+    inst.potential_hits = None
+    sends = asyncio.run(e._proximity_pass(None))
+    assert sends == []
+    assert not inst.notified.get("potential_long")     # no fire (unchanged)
+    hits = inst.potential_hits or {}
+    assert hits.get("long") is not None               # display refreshed
+    assert hits["long"]["fired"] is False
+
+
+def test_proximity_display_shows_fired_side_out_of_zone(cfg, monkeypatch):
+    """A fired touch keeps displaying (fired=True) while the pattern is
+    <12h old, even with price far away — the show-fired-too contract."""
+    e = _engine(cfg, monkeypatch)
+    inst = _inst(notified={"compression": True, "breakout": False,
+                           "potential_short": True,
+                           "potential_short_touch_ts": T0 + 10_000_000})
+    e.instances[inst.id] = inst
+    short_c = mk(short_path())
+    e._last_candles = {(inst.symbol, "1h"): short_c,
+                       (inst.symbol, "15m"): short_c}
+    monkeypatch.setattr(eng_mod, "fetch_last_price",
+                        lambda ses, sym: _afut(95.0))
+    monkeypatch.setattr(eng_mod, "fetch_klines",
+                        lambda ses, sym, tf, lim: _afut(short_c))
+    monkeypatch.setattr(eng_mod, "time",
+                        types.SimpleNamespace(time=lambda: NOW_S))
+    asyncio.run(e._proximity_pass(None))
+    hits = inst.potential_hits or {}
+    assert hits.get("short") and hits["short"]["fired"] is True
 
 
 # ── the same-scan invariant (user rule 2026-09-28, ONEUSDT case) ──────

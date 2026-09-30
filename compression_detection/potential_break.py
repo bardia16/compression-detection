@@ -87,7 +87,8 @@ def find_potential(side: str,
                    box_at=None,
                    touch_atr: Optional[float] = None,
                    since_touch_ts: int = 0,
-                   live_price: Optional[float] = None) -> Optional[dict]:
+                   live_price: Optional[float] = None,
+                   for_display: bool = False) -> Optional[dict]:
     """New trigger logic (user rule 2026-09-28, see module docstring).
 
     Checks every trigger tf (lower tfs nearest-first + the box's own tf)
@@ -172,13 +173,19 @@ def find_potential(side: str,
                 continue
 
             # close zone: price in [line - band, line], never past the line
-            price = live_price if live_price is not None else candles[-1].close
-            if side == "long":
-                if price > line or price < line - band:
-                    continue
-            else:
-                if price < line or price > line + band:
-                    continue
+            # for_display (user rule 2026-09-30, AKE case): the display
+            # shows the PATTERN (touch + swing inside the 12h window) —
+            # price walking away from the boundary right after the swing
+            # must not blank the cell. The firing paths never pass
+            # for_display, so the fire gate above is untouched.
+            if not for_display:
+                price = live_price if live_price is not None else candles[-1].close
+                if side == "long":
+                    if price > line or price < line - band:
+                        continue
+                else:
+                    if price < line or price > line + band:
+                        continue
 
             # one alert per touch + box anchor
             if p_a.ts <= since_touch_ts:

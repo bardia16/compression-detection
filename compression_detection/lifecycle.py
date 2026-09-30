@@ -236,6 +236,12 @@ class Instance:
     # moment it returns. After `out_of_universe_ttl_s` of absence the engine
     # retires the instance (see retire_out_of_universe).
     out_of_universe_since: Optional[int] = None
+    # sticky-potential display (user rule 2026-09-30, watchlist-test
+    # compressions tab): per-side freshest UNALERTED potential hit —
+    # {"long": {"pattern_tf", "swing_ts", "touch_ts"} | None, "short": …}
+    # — written by both potential passes, persisted, display-only (no
+    # engine consumer gates on it).
+    potential_hits: Optional[dict] = None
 
     # ── helpers ────────────────────────────────────────────────────────
     @property
@@ -326,6 +332,7 @@ class Instance:
             "probe_candle_ms": self.probe_candle_ms, "probe_side": self.probe_side,
             "events": self.events,
             "out_of_universe_since": self.out_of_universe_since,
+            "potential_hits": self.potential_hits,
         }
 
     @staticmethod
@@ -375,6 +382,7 @@ class Instance:
             probe_side=d.get("probe_side", ""),
             events=list(d.get("events") or []),
             out_of_universe_since=d.get("out_of_universe_since"),
+            potential_hits=d.get("potential_hits"),
         )
 
 

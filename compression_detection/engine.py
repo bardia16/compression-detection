@@ -399,6 +399,11 @@ class Engine:
 
             fresh_s = (now_s - POTENTIAL_FRESH_S) * 1000
             hits = []
+            # sticky-potential display (user rule 2026-09-30): per-side
+            # freshest UNALERTED hit (survives spent-touch + legacy-flag +
+            # 12h freshness) — written even when nothing fires, so the
+            # watchlist compressions tab always mirrors the real state.
+            disp: Dict[str, Optional[dict]] = {"long": None, "short": None}
             for side in ("long", "short"):
                 # one alert PER TOUCH (user rule 2026-09-27 evening): the
                 # touch that fired is stored; the side re-arms only on a
@@ -421,9 +426,13 @@ class Engine:
                 # older than 12h is old news.
                 if hit["confirm_ts"] < fresh_s:
                     continue
+                disp[side] = {"pattern_tf": hit["pattern_tf"],
+                              "swing_ts": hit["confirm_ts"],
+                              "touch_ts": hit["touch_ts"]}
                 hit["side"] = side
                 hits.append(hit)
 
+            inst.potential_hits = disp
             if not hits:
                 continue
             # ONE per box: the freshest confirmation wins (a tie keeps the
@@ -916,6 +925,7 @@ class Engine:
                     if tf != inst.tf and fresh.get(tf)]
 
             hits = []
+            disp: Dict[str, Optional[dict]] = {"long": None, "short": None}
             for side in sorted({s for ss in near.values() for s in ss}):
                 spent = inst.notified.get(f"potential_{side}_touch_ts")
                 if spent is None and inst.notified.get(f"potential_{side}"):
@@ -932,9 +942,17 @@ class Engine:
                     continue
                 if hit["confirm_ts"] < fresh_s:
                     continue
+                disp[side] = {"pattern_tf": hit["pattern_tf"],
+                              "swing_ts": hit["confirm_ts"],
+                              "touch_ts": hit["touch_ts"]}
                 hit["side"] = side
                 hits.append(hit)
+            # sticky-potential display (user rule 2026-09-30): sides not
+            # in zone this pass clear — persist even without sends so the
+            # watchlist tab sees the clear within this 60 s pass.
+            inst.potential_hits = disp
             if not hits:
+                self._save_state()
                 continue
 
             hits.sort(key=lambda h: h["confirm_ts"], reverse=True)

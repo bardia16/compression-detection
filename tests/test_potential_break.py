@@ -433,6 +433,45 @@ def test_actions_skip_already_flagged_side(cfg, monkeypatch):
     acts = e._potential_actions({inst.id: inst},
                                 {(inst.symbol, "1h"): mk(long_path())}, now_s=NOW_S)
     assert acts == []
+    # display mirrors the same state: a legacy-flagged side is never
+    # re-evaluated, so its sticky-potential cell is empty
+    assert (inst.potential_hits or {}).get("long") is None
+
+
+def test_potential_hits_stored_and_cleared(cfg, monkeypatch):
+    """sticky-potential display (user rule 2026-09-30): the freshest
+    unalerted hit per side lands in inst.potential_hits; once the touch
+    fires, the next pass clears it (nothing unalerted remains)."""
+    e = _engine(cfg, monkeypatch)
+    inst = _inst()
+    key = {(inst.symbol, "1h"): mk(long_path()),
+           (inst.symbol, "15m"): mk(_line(100, 100, 40))}
+    acts = e._potential_actions({inst.id: inst}, key, now_s=NOW_S)
+    assert len(acts) == 1
+    hits = inst.potential_hits or {}
+    assert hits.get("long"), hits
+    assert hits["long"]["pattern_tf"] == "1h"
+    assert isinstance(hits["long"]["swing_ts"], int)
+    assert hits.get("short") is None        # long fixture has no EL touch
+    # same touch next pass -> fired already -> display clears both sides
+    e._potential_actions({inst.id: inst}, key, now_s=NOW_S + 600)
+    assert (inst.potential_hits or {}).get("long") is None
+    assert (inst.potential_hits or {}).get("short") is None
+
+
+def test_potential_hits_round_trip(cfg):
+    inst = _inst()
+    inst.notified = {"compression": False, "breakout": False}
+    inst.potential_hits = {"long": {"pattern_tf": "15m", "swing_ts": 111,
+                                     "touch_ts": 222},
+                           "short": None}
+    d = inst.to_dict()
+    inst2 = Instance.from_dict(d)
+    assert inst2.potential_hits == {"long": {"pattern_tf": "15m",
+                                              "swing_ts": 111,
+                                              "touch_ts": 222},
+                                     "short": None}
+    assert inst2.to_dict() == d
 
 
 # ── dispatch ───────────────────────────────────────────────────────────

@@ -237,11 +237,22 @@ class Instance:
     # retires the instance (see retire_out_of_universe).
     out_of_universe_since: Optional[int] = None
     # sticky-potential display (user rule 2026-09-30, watchlist-test
-    # compressions tab): per-side freshest UNALERTED potential hit —
-    # {"long": {"pattern_tf", "swing_ts", "touch_ts"} | None, "short": …}
-    # — written by both potential passes, persisted, display-only (no
-    # engine consumer gates on it).
+    # compressions tab): per-side freshest potential hit, fired or not
+    # (rev. "show fired too") — {"long": {"pattern_tf", "swing_ts",
+    # "touch_ts", "fired"} | None, "short": …} — written by both potential
+    # passes every 60s, persisted, display-only (no engine consumer gates
+    # on it). Cleared whenever the instance goes TERMINAL (see
+    # __setattr__ below — terminal rows never render, and ghost cells
+    # from disk mislead verifies).
     potential_hits: Optional[dict] = None
+
+    def __setattr__(self, name, value) -> None:
+        # single choke point for the 9 terminal transitions (breakout /
+        # invalidation / out-of-universe retire) + loads from disk:
+        # terminal = not displayed -> drop the sticky-potential cell.
+        super().__setattr__(name, value)
+        if name == "state" and value in TERMINAL_STATES:
+            super().__setattr__("potential_hits", None)
 
     # ── helpers ────────────────────────────────────────────────────────
     @property
@@ -382,7 +393,10 @@ class Instance:
             probe_side=d.get("probe_side", ""),
             events=list(d.get("events") or []),
             out_of_universe_since=d.get("out_of_universe_since"),
-            potential_hits=d.get("potential_hits"),
+            # terminal ghosts clear on load (field order would otherwise
+            # re-set them AFTER __setattr__ fired on state=)
+            potential_hits=(None if d["state"] in TERMINAL_STATES
+                            else d.get("potential_hits")),
         )
 
 

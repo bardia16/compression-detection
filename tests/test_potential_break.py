@@ -468,6 +468,28 @@ def test_potential_hits_show_fired_and_clear(cfg, monkeypatch):
     assert (inst.potential_hits or {}).get("short") is None
 
 
+def test_terminal_state_clears_potential_hits():
+    # user rule 2026-09-30: terminal rows never render - the sticky cell
+    # dies with the instance (all 9 transitions funnel through
+    # __setattr__, and ghosts shipped in the state file clear on load).
+    from compression_detection.lifecycle import STATE_COMPRESSING
+    inst = _inst()
+    inst.potential_hits = {"long": {"pattern_tf": "15m", "swing_ts": 1,
+                                     "touch_ts": 2, "fired": True},
+                           "short": None}
+    inst.state = STATE_COMPRESSING
+    assert inst.potential_hits is not None     # active states keep it
+    inst.state = STATE_BREAKOUT
+    assert inst.potential_hits is None
+
+    # ghost already on disk: from_dict drops it
+    d = inst.to_dict()
+    d["state"] = "invalidated"
+    d["potential_hits"] = {"long": {"pattern_tf": "1h"}, "short": None}
+    back = Instance.from_dict(d)
+    assert back.potential_hits is None
+
+
 def test_potential_hits_round_trip(cfg):
     inst = _inst()
     inst.notified = {"compression": False, "breakout": False}

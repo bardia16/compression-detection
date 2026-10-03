@@ -523,12 +523,22 @@ class Engine:
             inst = a.instance
             kind = a.kind
             if kind == "compression_notify":
-                if not self.cfg.notif_enabled or self.dry_run or self.tg is None:
+                if (not self.cfg.notif_enabled
+                        or not getattr(self.cfg, "notif_post_compression", True)
+                        or self.dry_run or self.tg is None):
                     # HOLD, never consume: warmup keeps the notification pending
                     # (no flag write) — when notifications go live, the current
                     # compressions flush out (user rule 2026-09-16).
+                    # post_compression=False (2026-10-03, BREAKOUTS-ONLY channel)
+                    # parks pattern confirmations on this same path: no
+                    # `notified.compression` write, so flipping the flag back on
+                    # sends every pending compression.
                     self.audit.write({"event": "notify_held", "kind": kind,
-                                      "id": inst.id, "dry": self.dry_run})
+                                      "id": inst.id, "dry": self.dry_run,
+                                      "post_compression":
+                                          getattr(self.cfg,
+                                                  "notif_post_compression",
+                                                  True)})
                     continue
                 # candle-problem gate (user rule 2026-09-16): anomalous gaps in
                 # the last 30 candles → no notification (held for retry)
@@ -594,13 +604,29 @@ class Engine:
                 chart_level = None if detail["side"] == _flat_side \
                     else [detail["level"]]
                 # reply-thread onto this structure's compression confirmation
-                # message (user rule 2026-09-16); standalone if none was sent
+                # message (user rule 2026-09-16); standalone if none was sent.
+                # A STALE anchor must never swallow the breakout: with
+                # post_compression=false (2026-10-03) no NEW compression
+                # anchor is ever created, so msg_ids[0] is a legacy message
+                # the user can delete — Telegram then answers 400 "message
+                # to be replied not found" for BOTH forms, mid stays None,
+                # notified["breakout"] never writes and the alert retries
+                # forever without ever posting. Same fix as _post_photos:
+                # try WITH the reply first, then WITHOUT it.
                 reply_to = inst.msg_ids[0] if inst.msg_ids else None
+                img = await self._chart(ses, inst, chart_level, segs)
+                targets: List[Optional[int]] = [reply_to] if reply_to else [None]
+                if reply_to:
+                    targets.append(None)
                 mid = None
-                if img := await self._chart(ses, inst, chart_level, segs):
-                    mid = await self.tg.post_photo(caption, img, reply_to)
-                if mid is None:
-                    mid = await self.tg.post(caption, reply_to)
+                for target in targets:
+                    if img is not None:
+                        mid = await self.tg.post_photo(caption, img,
+                                                       reply_to_id=target)
+                    if mid is None:
+                        mid = await self.tg.post(caption, reply_to_id=target)
+                    if mid is not None:
+                        break
                 sends.append({"kind": kind, "id": inst.id, "msg_id": mid})
                 if mid is not None:
                     inst.msg_ids.append(mid)
@@ -835,13 +861,26 @@ class Engine:
                           else None)
             chart_level = None if side == _flat_side else [level]
             # heads-up threads onto this structure's compression confirmation
-            # message (user rule 2026-09-16); standalone if none was sent
+            # message (user rule 2026-09-16); standalone if none was sent.
+            # Stale-anchor guard (2026-10-03, same as breakout_post): with
+            # post_compression=false no new anchor is ever created, so a
+            # deleted legacy message would 400 BOTH forms and the heads-up
+            # would silently never post for that candle. Try WITH the reply,
+            # then WITHOUT it.
             reply_to = inst.msg_ids[0] if inst.msg_ids else None
+            img = await self._chart(ses, inst, chart_level, segs)
+            targets: List[Optional[int]] = [reply_to] if reply_to else [None]
+            if reply_to:
+                targets.append(None)
             mid = None
-            if img := await self._chart(ses, inst, chart_level, segs):
-                mid = await self.tg.post_photo(caption, img, reply_to)
-            if mid is None:
-                mid = await self.tg.post(caption, reply_to)
+            for target in targets:
+                if img is not None:
+                    mid = await self.tg.post_photo(caption, img,
+                                                   reply_to_id=target)
+                if mid is None:
+                    mid = await self.tg.post(caption, reply_to_id=target)
+                if mid is not None:
+                    break
             if mid is not None:
                 inst.probe_msg_id = mid
                 inst.probe_candle_ms = open_ms

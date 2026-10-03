@@ -42,6 +42,14 @@ class Config:
     # pivot (asc: last EH, desc: last EL) — the pattern's final HL/LH may be
     # LIVE, so proximity to the flat side is what makes it actionable.
     triangle_notify_near_atr: float = 1.0
+    # Pattern confirmations (user rule 2026-10-03): the Breakouts channel
+    # carries BREAKOUTS ONLY — box/triangle confirmation posts already live
+    # on the watchlist-test site. False = the `compression_notify` action is
+    # HELD, never consumed (same path as notif_enabled=False, so `notified.
+    # compression` stays False and flipping the flag back on flushes every
+    # pending compression). Breakout/potential posts are unaffected; with no
+    # compression anchor they send standalone.
+    notif_post_compression: bool = True
 
     # convenience delegates (lifecycle reads these off the config object)
     @property
@@ -120,4 +128,6 @@ class Config:
             prune_after_days=int(state["prune_after_days"]),
             triangle_notify_near_atr=float(
                 notif.get("triangle_notify_near_atr", 1.0)),
+            notif_post_compression=bool(
+                notif.get("post_compression", True)),
         )

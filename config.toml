@@ -51,6 +51,12 @@ breakout_buffer_atr = 0.0      # live/close strictly beyond boundary
 
 [notifications]
 enabled = true                 # live since 2026-09-16 (held compressions flush on enable)
+# BREAKOUTS-ONLY channel (user rule 2026-10-03): box/triangle pattern
+# confirmations are NOT posted — they already live on the watchlist-test
+# site. The compression_notify action is HELD (never consumed), so turning
+# this back on flushes every pending compression. Breakouts, potential
+# breaks and the daw S/R alerts are unaffected.
+post_compression = false
 notify_min_state = "confirmed" # compression message when instance reaches this state
 notify_on_compress_upgrade = false
 notify_invalidation = false

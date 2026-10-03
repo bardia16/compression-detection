@@ -36,7 +36,7 @@ class FakeTG:
         self.deletes = []
         self._n = 100
 
-    async def post(self, text, reply_to_id=None):
+    async def post(self, text, reply_to_id=None) -> int | None:
         self.posts.append(text)
         self.replies.append(reply_to_id)
         self._n += 1
@@ -55,6 +55,10 @@ def cfg(tmp_path, monkeypatch):
     c = Config.load()
     c.timeframes = ["15m"]
     c.state_path = tmp_path / "structure_state.json"
+    # Production ships post_compression=false (BREAKOUTS-ONLY channel,
+    # 2026-10-03) — these tests exercise the ENGINE, not the channel policy,
+    # so pin the default-on path here. test_post_compression_false_* flips it.
+    c.notif_post_compression = True
     # isolate audit + report writers (tests must not pollute prod dirs)
     monkeypatch.setattr(eng_mod, "REPORTS_DIR", tmp_path / "reports")
     monkeypatch.setattr(eng_mod, "AUDIT_DIR", tmp_path / "audit")
@@ -188,6 +192,79 @@ def test_held_notifications_flush_on_enable(cfg, monkeypatch):
     assert "Compression" in tg.posts[0] and "boundaries" in tg.posts[0]
     inst2 = list(e2.instances.values())[0]
     assert inst2.notified["compression"] is True
+
+
+def test_post_compression_false_holds_pattern_but_breakout_still_fires(
+        cfg, monkeypatch):
+    """BREAKOUTS-ONLY channel (user rule 2026-10-03): post_compression=False
+    HOLDS every box/triangle confirmation (never consumed) while the
+    breakout still posts — standalone, since no compression anchor exists."""
+    cfg.notif_post_compression = False
+    cfg.notif_enabled = True
+    tg = FakeTG()
+    patch_env(monkeypatch, box_closes())
+    e1, res1 = scan(cfg, tg=tg)
+    assert tg.posts == []                                # no pattern post
+    inst1 = list(e1.instances.values())[0]
+    assert inst1.notified["compression"] is False        # held, not consumed
+    assert inst1.msg_ids == []                           # no anchor message
+
+    # breaker + 3 holds -> confirmed breakout
+    patch_env(monkeypatch, box_closes() + [104.5, 104.6, 104.7, 104.8])
+    e2, res2 = scan(cfg, tg=tg)
+    assert any("Breakout" in p for p in tg.posts)        # breakout still sent
+    assert tg.replies[-1] is None                        # ...standalone
+    inst2 = list(e2.instances.values())[0]
+    assert inst2.notified["compression"] is False        # still never consumed
+
+    # flipping the flag back on flushes the pending compression
+    cfg.notif_post_compression = True
+    e3, res3 = scan(cfg, tg=tg)
+    assert any("Compression" in p for p in tg.posts)
+
+
+class DeadAnchorTG(FakeTG):
+    """Telegram answers 400 'message to be replied not found' when the
+    reply target has been deleted — the alert must still land WITHOUT the
+    reply. Relevant now that post_compression=false means no new anchor is
+    ever created, so every anchor is a deletable legacy message."""
+
+    async def post(self, text, reply_to_id=None) -> int | None:
+        if reply_to_id is not None:
+            return None                      # 400: dead reply target
+        return await super().post(text, None)
+
+
+def test_stale_anchor_never_swallows_breakout_post(cfg, monkeypatch):
+    cfg.notif_enabled = True
+    tg = DeadAnchorTG()
+    patch_env(monkeypatch, box_closes())
+    e, _ = scan(cfg, tg=tg)
+    assert len(tg.posts) == 1                          # compression (root)
+    assert list(e.instances.values())[0].msg_ids        # anchor recorded
+
+    patch_env(monkeypatch, box_closes() + [104.5, 104.6, 104.7, 104.8])
+    e2, _ = scan(cfg, tg=tg)
+    assert any("Breakout" in p for p in tg.posts)      # alert landed
+    assert tg.replies[-1] is None                      # ...standalone
+    inst = list(e2.instances.values())[0]
+    assert inst.notified["breakout"] is True           # consumed, not looping
+
+
+def test_stale_anchor_never_swallows_probe_heads_up(cfg, monkeypatch):
+    cfg.notif_enabled = True
+    tg = DeadAnchorTG()
+    patch_env(monkeypatch, box_closes())
+    e, _ = scan(cfg, tg=tg)
+    assert list(e.instances.values())[0].msg_ids        # anchor recorded
+
+    open_ms = mk_candles(box_closes())[-1].ts + STEP
+    monkeypatch.setattr(eng_mod, "probe_due", lambda *a, **kw: open_ms)
+    patch_env(monkeypatch, box_closes(), last_price=103.6)
+    n = asyncio.run(e.probe_once(None))
+    assert n == 1                                      # heads-up posted
+    assert tg.replies[-1] is None                      # ...standalone
+    assert list(e.instances.values())[0].probe_msg_id is not None
 
 
 def test_symbols_stored_full_binance_form(cfg, monkeypatch):
